@@ -1,0 +1,244 @@
+package kr.smartscale.app
+
+import android.content.ContentValues
+import android.content.Context
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteOpenHelper
+import java.util.Calendar
+import kotlin.math.sqrt
+
+/** 사용자 설정 (프로필·기기·해석 방식) */
+class Prefs(ctx: Context) {
+    private val sp = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+
+    var name: String
+        get() = sp.getString("name", "") ?: ""
+        set(v) { sp.edit().putString("name", v).apply() }
+    var male: Boolean
+        get() = sp.getBoolean("male", true)
+        set(v) { sp.edit().putBoolean("male", v).apply() }
+    var birthYear: Int
+        get() = sp.getInt("birthYear", 0)
+        set(v) { sp.edit().putInt("birthYear", v).apply() }
+    var heightCm: Float
+        get() = sp.getFloat("height", 0f)
+        set(v) { sp.edit().putFloat("height", v).apply() }
+    var goal: Float
+        get() = sp.getFloat("goal", 0f)
+        set(v) { sp.edit().putFloat("goal", v).apply() }
+    var deviceAddr: String
+        get() = sp.getString("devAddr", "") ?: ""
+        set(v) { sp.edit().putString("devAddr", v).apply() }
+    var deviceName: String
+        get() = sp.getString("devName", "") ?: ""
+        set(v) { sp.edit().putString("devName", v).apply() }
+    var autoSave: Boolean
+        get() = sp.getBoolean("autoSave", true)
+        set(v) { sp.edit().putBoolean("autoSave", v).apply() }
+    var vibrate: Boolean
+        get() = sp.getBoolean("vibrate", true)
+        set(v) { sp.edit().putBoolean("vibrate", v).apply() }
+
+    /** 0 = 자동(YUNMAI 형식), 1 = 사용자 지정 위치 */
+    var parseMode: Int
+        get() = sp.getInt("parseMode", 0)
+        set(v) { sp.edit().putInt("parseMode", v).apply() }
+    var customOffset: Int
+        get() = sp.getInt("cOffset", 13)
+        set(v) { sp.edit().putInt("cOffset", v).apply() }
+    var customDiv: Int
+        get() = sp.getInt("cDiv", 100)
+        set(v) { sp.edit().putInt("cDiv", v).apply() }
+    var customLE: Boolean
+        get() = sp.getBoolean("cLE", false)
+        set(v) { sp.edit().putBoolean("cLE", v).apply() }
+
+    val age: Int
+        get() = if (birthYear <= 0) 0 else Calendar.getInstance().get(Calendar.YEAR) - birthYear
+    val profileReady: Boolean
+        get() = heightCm > 50f && birthYear > 1900
+}
+
+/** 측정 기록 1건 */
+data class Rec(
+    val id: Long,
+    val ts: Long,
+    val weight: Double,
+    val res: Int,
+    val sfat: Double?,
+    val src: String
+)
+
+class Db(ctx: Context) : SQLiteOpenHelper(ctx, "scale.db", null, 1) {
+    override fun onCreate(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE TABLE rec (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, " +
+                "weight REAL NOT NULL, res INTEGER NOT NULL DEFAULT 0, sfat REAL, src TEXT)"
+        )
+    }
+
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+
+    fun insert(ts: Long, weight: Double, res: Int, sfat: Double?, src: String): Long {
+        val cv = ContentValues()
+        cv.put("ts", ts)
+        cv.put("weight", weight)
+        cv.put("res", res)
+        if (sfat != null) cv.put("sfat", sfat) else cv.putNull("sfat")
+        cv.put("src", src)
+        return writableDatabase.insert("rec", null, cv)
+    }
+
+    fun all(): List<Rec> {
+        val out = ArrayList<Rec>()
+        readableDatabase.rawQuery(
+            "SELECT id, ts, weight, res, sfat, src FROM rec ORDER BY ts DESC", null
+        ).use { c ->
+            while (c.moveToNext()) {
+                out.add(
+                    Rec(
+                        c.getLong(0), c.getLong(1), c.getDouble(2), c.getInt(3),
+                        if (c.isNull(4)) null else c.getDouble(4),
+                        c.getString(5) ?: ""
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    fun delete(id: Long) {
+        writableDatabase.delete("rec", "id=?", arrayOf(id.toString()))
+    }
+
+    fun clear() {
+        writableDatabase.delete("rec", null, null)
+    }
+}
+
+/** 체성분 계산 결과 (가정용 추정치) */
+data class Body(
+    val bmi: Double,
+    val stdWeight: Double,
+    val obesity: Double,
+    val fatPct: Double?,
+    val fatKg: Double?,
+    val lbm: Double?,
+    val musclePct: Double?,
+    val muscleKg: Double?,
+    val skeletalPct: Double?,
+    val waterPct: Double?,
+    val bmr: Double,
+    val scaleFat: Double?
+)
+
+object BodyCalc {
+    /**
+     * 임피던스(저항) 기반 체지방률 추정.
+     * 오픈소스 openScale 의 YUNMAI 공식을 참고한 근사식이라 공식 앱 수치와 다를 수 있음.
+     */
+    private fun fatFromRes(age: Int, weight: Double, heightCm: Double, res: Int, male: Boolean): Double? {
+        if (res <= 0) return null
+        var r = (res - 100.0) / 100.0
+        val h = heightCm / 100.0
+        if (r >= 1) r = sqrt(r)
+        var f = weight * 1.5 / h / h + age * 0.08
+        if (male) f -= 10.8
+        f = f - 7.4 + r
+        return if (f < 3.0 || f > 75.0) null else f
+    }
+
+    fun calc(weight: Double, res: Int, scaleFat: Double?, p: Prefs): Body? {
+        if (!p.profileReady) return null
+        val hCm = p.heightCm.toDouble()
+        val h = hCm / 100.0
+        val bmi = weight / (h * h)
+        val std = 22.0 * h * h
+        val obesity = weight / std * 100.0
+        val sf = scaleFat?.takeIf { it in 3.0..70.0 }
+        val fat = fatFromRes(p.age, weight, hCm, res, p.male) ?: sf
+
+        if (fat == null) {
+            // 체지방을 모르면 Mifflin-St Jeor 식으로 기초대사량만
+            val bmr = 10 * weight + 6.25 * hCm - 5 * p.age + (if (p.male) 5 else -161)
+            return Body(bmi, std, obesity, null, null, null, null, null, null, null, bmr, sf)
+        }
+        val fatKg = weight * fat / 100.0
+        val lbm = weight - fatKg
+        val musclePct = (100.0 - fat) * 0.67
+        val muscleKg = weight * musclePct / 100.0
+        val skeletal = (100.0 - fat) * 0.53
+        val water = (100.0 - fat) * 0.726
+        val bmr = 370 + 21.6 * lbm // Katch-McArdle
+        return Body(bmi, std, obesity, fat, fatKg, lbm, musclePct, muscleKg, skeletal, water, bmr, sf)
+    }
+
+    fun bmiGrade(b: Double): Pair<String, Int> = when {
+        b < 18.5 -> "저체중" to Ui.BLUE
+        b < 23.0 -> "정상" to Ui.GREEN
+        b < 25.0 -> "과체중" to Ui.ORANGE
+        else -> "비만" to Ui.RED
+    }
+
+    fun fatGrade(f: Double, male: Boolean): Pair<String, Int> {
+        val lo = if (male) 10.0 else 18.0
+        val hi = if (male) 20.0 else 28.0
+        return when {
+            f < lo -> "낮음" to Ui.BLUE
+            f <= hi -> "표준" to Ui.GREEN
+            f <= hi + 5 -> "약간 높음" to Ui.ORANGE
+            else -> "높음" to Ui.RED
+        }
+    }
+}
+
+/** 체중계에서 받은 패킷 해석 결과 */
+data class Packet(val final: Boolean, val weight: Double, val res: Int, val scaleFat: Double?)
+
+object Parser {
+    fun u16be(b: ByteArray, i: Int): Int = ((b[i].toInt() and 0xff) shl 8) or (b[i + 1].toInt() and 0xff)
+    fun u16le(b: ByteArray, i: Int): Int = (b[i].toInt() and 0xff) or ((b[i + 1].toInt() and 0xff) shl 8)
+
+    fun hex(b: ByteArray): String = b.joinToString(" ") { String.format("%02x", it.toInt() and 0xff) }
+
+    fun parse(b: ByteArray, p: Prefs): Packet? {
+        if (p.parseMode == 1) {
+            val o = p.customOffset
+            if (o < 0 || b.size < o + 2) return null
+            val raw = if (p.customLE) u16le(b, o) else u16be(b, o)
+            val w = raw.toDouble() / p.customDiv
+            return if (w in 2.0..300.0) Packet(false, w, 0, null) else null
+        }
+        // YUNMAI 형식: 0x0D 로 시작, 4번째 바이트가 종류 (0x01 측정 중, 0x02 최종)
+        if (b.size < 10 || (b[0].toInt() and 0xff) != 0x0D) return null
+        val type = b[3].toInt() and 0xff
+        if (type == 0x02 && b.size >= 17) {
+            val w = u16be(b, 13) / 100.0
+            val res = u16be(b, 15)
+            val f: Double? = if (b.size >= 19) u16be(b, 17) / 100.0 else null
+            return if (w in 2.0..300.0) Packet(true, w, res, f) else null
+        }
+        if (type == 0x01) {
+            val w = u16be(b, 8) / 100.0
+            return if (w in 2.0..300.0) Packet(false, w, 0, null) else null
+        }
+        return null
+    }
+
+    data class Cand(val offset: Int, val le: Boolean, val div: Int, val value: Double)
+
+    /** 보정 도구: 패킷 안에서 체중일 수 있는 모든 위치 */
+    fun candidates(b: ByteArray): List<Cand> {
+        val out = ArrayList<Cand>()
+        for (i in 0 until b.size - 1) {
+            for (le in listOf(false, true)) {
+                val raw = if (le) u16le(b, i) else u16be(b, i)
+                for (div in listOf(100, 10, 20, 200)) {
+                    val v = raw.toDouble() / div
+                    if (v in 2.0..300.0) out.add(Cand(i, le, div, v))
+                }
+            }
+        }
+        return out
+    }
+}

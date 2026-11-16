@@ -1227,7 +1227,13 @@ class MainActivity : Activity(), Hub.UiListener {
             else -> 2
         }
         fun line(f: Found): String {
-            val dist = when { f.rssi > -60 -> "아주 가까움"; f.rssi > -75 -> "가까움"; else -> "멂" }
+            val dist = when {
+                f.addr == prefs.deviceAddr && Hub.bleConnected -> "지금 연결됨"
+                f.rssi <= -200 -> "신호 대기 중 · 선택해도 돼요"
+                f.rssi > -60 -> "아주 가까움"
+                f.rssi > -75 -> "가까움"
+                else -> "멂"
+            }
             val nm = f.name.ifEmpty { "(이름 없음)" }
             return when (rank(f)) {
                 0 -> "✅ 내 체중계 · 예전에 연결한 기기\n$nm · ${f.addr} · $dist"
@@ -1272,6 +1278,12 @@ class MainActivity : Activity(), Hub.UiListener {
             stopped = true
             try { scanner.stopScan(cb) } catch (e: Exception) {}
         }
+        // 연결 중인 체중계는 신호를 내보내지 않아 검색에 안 잡힘 → 저장된 체중계를 미리 목록에 넣음
+        for (a in (listOf(prefs.deviceAddr) + known).filter { it.isNotEmpty() }.distinct()) {
+            val nm = if (a == prefs.deviceAddr && prefs.deviceName.isNotEmpty()) prefs.deviceName else prefs.knownName(a)
+            found[a] = Found(a, nm, if (a == prefs.deviceAddr && Hub.bleConnected) -40 else -200, true)
+        }
+        refresh()
         try {
             scanner.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), cb)
         } catch (e: Exception) {

@@ -1097,6 +1097,11 @@ class MainActivity : Activity(), Hub.UiListener {
             ct.setTextIsSelectable(true)
             sc.addView(ct, lp(bottom = 4))
             sc.addView(label("이 코드를 다른 폰의 「가족 코드 입력」에 넣으세요. 코드는 비밀번호처럼 관리하세요.", 12f, Ui.SUB))
+            if (!Sync.active) button(sc, "공유 다시 연결", 2) {
+                ScaleService.start(this, ScaleService.ACTION_RESYNC)
+                toast("다시 연결하는 중이에요")
+                handler.postDelayed({ if (currentTab == 3) showTab(3) }, 3000)
+            }
             button(sc, "코드 복사", 1) {
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                 cm.setPrimaryClip(ClipData.newPlainText("family", code))

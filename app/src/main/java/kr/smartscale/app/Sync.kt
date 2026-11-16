@@ -45,7 +45,9 @@ object Sync {
         else auth.signInAnonymously()
             .addOnSuccessListener { listen(code) }
             .addOnFailureListener {
-                lastError = "로그인 실패: ${it.message}"
+                lastError = if ((it.message ?: "").contains("administrators"))
+                    "Firebase에서 익명 로그인이 꺼져 있어요 (Authentication → 로그인 방법 → 익명 사용 설정)"
+                else "로그인 실패: ${it.message}"
                 Hub.addLog("동기화 " + lastError)
                 Hub.emit(Hub.EV_STATE)
             }

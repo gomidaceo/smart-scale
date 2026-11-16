@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "949960887516",
+    "project_id": "smart-scale-acb11",
+    "storage_bucket": "smart-scale-acb11.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:949960887516:android:00df3488d8ac6200887819",
+        "android_client_info": {
+          "package_name": "kr.smartscale.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDTVcCcbUvuJXkdxv5ZJMYQ64aM5EfYYCU"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -30,6 +30,7 @@ import android.view.ViewGroup
 import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -38,21 +39,38 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 
 object Ui {
-    const val BG = 0xFFF4F6F8.toInt()
-    const val TEAL = 0xFF0EA5A4.toInt()
-    const val TEXT = 0xFF1B1F24.toInt()
-    const val SUB = 0xFF6B7280.toInt()
-    const val LINE = 0xFFE5E7EB.toInt()
-    const val RED = 0xFFEF4444.toInt()
-    const val ORANGE = 0xFFF59E0B.toInt()
-    const val GREEN = 0xFF10B981.toInt()
-    const val BLUE = 0xFF3B82F6.toInt()
-    const val CHIP = 0xFFEEF0F3.toInt()
+    const val BG = 0xFFF4F7F6.toInt()
+    const val CARD = 0xFFFFFFFF.toInt()
+    const val FIG_BG = 0xFFF2F6F5.toInt()
+    const val TEXT = 0xFF14201C.toInt()
+    const val TEXT2 = 0xFF3D4B47.toInt()
+    const val SUB = 0xFF5B6B66.toInt()
+    const val LINE = 0xFFE6ECEA.toInt()
+    const val TEAL = 0xFF12A594.toInt()
+    const val TEAL_DARK = 0xFF0B7F72.toInt()
+    const val TEAL_BG = 0xFFE3F5F2.toInt()
+    const val LOW_BG = 0xFFCFE0F5.toInt()
+    const val STD_BG = 0xFFCDEBE6.toInt()
+    const val HIGH_BG = 0xFFF8DDBE.toInt()
+    const val LOW_ACC = 0xFF3B82F6.toInt()
+    const val HIGH_ACC = 0xFFE8891C.toInt()
+    const val LOW_CHIP = 0xFFE4EEFB.toInt()
+    const val LOW_TEXT = 0xFF1D4E89.toInt()
+    const val HIGH_CHIP = 0xFFFDEBD6.toInt()
+    const val HIGH_TEXT = 0xFF9A4A06.toInt()
+    const val INFO_CHIP = 0xFFEEF2F1.toInt()
+    const val SOFT = 0xFFF1F5F4.toInt()
+    const val DARK = 0xFF0F1A17.toInt()
+    const val DARK2 = 0xFF16241F.toInt()
+    const val MINT = 0xFF2DD4BF.toInt()
+    const val MUTED_DARK = 0xFF9FB3AD.toInt()
+    const val ORANGE = 0xFFE8891C.toInt()
 }
 
 @SuppressLint("MissingPermission", "SetTextI18n")
@@ -61,6 +79,8 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
     private val REQ_PERM = 1
     private val REQ_CSV = 2
+    private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
+    private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 
     private lateinit var prefs: Prefs
     private lateinit var db: Db
@@ -70,22 +90,20 @@ class MainActivity : Activity(), ScaleBle.Listener {
     private lateinit var content: FrameLayout
     private val tabs = ArrayList<TextView>()
     private var currentTab = 0
+    private var showingDetail = false
 
-    // 측정 상태
     private var statusText = "등록된 체중계가 없어요"
     private var bleConnected = false
     private var liveWeight: Double? = null
+    private var liveStart = 0L
     private var lastMeasure: Measure? = null
-    private var lastSavedId: Long = -1
     private var lastPacket: ByteArray? = null
     private val logs = ArrayDeque<String>()
     private val recent = ArrayList<Pair<Long, Double>>()
 
-    // 측정 화면 뷰
-    private var vStatus: TextView? = null
-    private var vWeight: TextView? = null
-    private var vSub: TextView? = null
-    private var vResult: LinearLayout? = null
+    private var vLiveWeight: TextView? = null
+    private var vRing: RingView? = null
+    private var vConn: TextView? = null
 
     private var pendingPerm: (() -> Unit)? = null
     private var graphDays = 30
@@ -93,7 +111,8 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
     data class Measure(val ts: Long, val weight: Double, var res: Int, val sfat: Double?, var saved: Boolean)
 
-    private val fullDate = SimpleDateFormat("M월 d일 (E) HH:mm", Locale.KOREA)
+    private val dateHead = SimpleDateFormat("M월 d일 EEEE · a h:mm", Locale.KOREA)
+    private val fullDate = SimpleDateFormat("M월 d일 (E) a h:mm", Locale.KOREA)
     private val timeOnly = SimpleDateFormat("a h:mm", Locale.KOREA)
 
     // ───────────────────────── 생명주기
@@ -106,38 +125,39 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
         window.statusBarColor = Ui.BG
         window.navigationBarColor = Color.WHITE
-        window.decorView.systemUiVisibility =
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.setBackgroundColor(Ui.BG)
         content = FrameLayout(this)
-        root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(content, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
+        val line = View(this)
+        line.setBackgroundColor(Ui.LINE)
+        root.addView(line, LinearLayout.LayoutParams(MATCH, 1))
         val nav = LinearLayout(this)
         nav.orientation = LinearLayout.HORIZONTAL
         nav.setBackgroundColor(Color.WHITE)
-        nav.elevation = dp(8).toFloat()
-        listOf("⚖️\n측정", "📋\n기록", "📈\n그래프", "⚙️\n설정").forEachIndexed { i, t ->
+        nav.setPadding(dp(4), dp(8), dp(4), dp(10))
+        listOf("홈", "기록", "추이", "내 정보").forEachIndexed { i, t ->
             val tv = TextView(this)
             tv.text = t
             tv.gravity = Gravity.CENTER
             tv.textSize = 12f
-            tv.setPadding(0, dp(8), 0, dp(8))
-            tv.setOnClickListener { showTab(i) }
+            tv.compoundDrawablePadding = dp(3)
+            tv.setCompoundDrawablesWithIntrinsicBounds(null, NavIcon(this, i), null, null)
+            tv.setPadding(0, dp(4), 0, dp(4))
+            tv.setOnClickListener { showingDetail = false; showTab(i) }
             tabs.add(tv)
-            nav.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            nav.addView(tv, LinearLayout.LayoutParams(0, WRAP, 1f))
         }
-        root.addView(nav, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        root.addView(nav, LinearLayout.LayoutParams(MATCH, WRAP))
         setContentView(root)
 
         if (!prefs.profileReady) {
             showTab(3)
-            toast("먼저 내 프로필(키·출생연도·성별)을 입력해 주세요")
-        } else {
-            showTab(0)
-        }
+            toast("먼저 내 정보(키·출생연도·성별)를 입력해 주세요")
+        } else showTab(0)
 
         if (prefs.deviceAddr.isNotEmpty()) {
             ensurePerms { ensureBtOn { ble.connect(prefs.deviceAddr) } }
@@ -149,14 +169,23 @@ class MainActivity : Activity(), ScaleBle.Listener {
         super.onDestroy()
     }
 
-    // ───────────────────────── 공통 UI 도우미
+    override fun onBackPressed() {
+        when {
+            showingDetail -> { showingDetail = false; showTab(0) }
+            currentTab != 0 -> showTab(0)
+            else -> super.onBackPressed()
+        }
+    }
+
+    // ───────────────────────── UI 도우미
 
     private fun dp(v: Int): Int = (v * resources.displayMetrics.density + 0.5f).toInt()
 
-    private fun rounded(color: Int, radius: Int = 16): GradientDrawable {
+    private fun rounded(color: Int, radius: Int = 16, stroke: Int = 0): GradientDrawable {
         val g = GradientDrawable()
         g.setColor(color)
         g.cornerRadius = dp(radius).toFloat()
+        if (stroke != 0) g.setStroke(dp(1), stroke)
         return g
     }
 
@@ -165,133 +194,140 @@ class MainActivity : Activity(), ScaleBle.Listener {
         t.text = s
         t.textSize = size
         t.setTextColor(color)
-        if (bold) t.setTypeface(t.typeface, Typeface.BOLD)
+        t.includeFontPadding = false
+        t.setLineSpacing(0f, 1.15f)
+        if (bold) t.typeface = Typeface.create("sans-serif", Typeface.BOLD)
         return t
+    }
+
+    private fun heavy(s: String, size: Float, color: Int = Ui.TEXT): TextView {
+        val t = label(s, size, color)
+        t.typeface = Typeface.create("sans-serif-black", Typeface.NORMAL)
+        t.letterSpacing = -0.03f
+        return t
+    }
+
+    /** w, h 는 MATCH/WRAP 또는 픽셀값 */
+    private fun lp(w: Int = MATCH, h: Int = WRAP, top: Int = 0, bottom: Int = 0, left: Int = 0, right: Int = 0): LinearLayout.LayoutParams {
+        val p = LinearLayout.LayoutParams(w, h)
+        p.topMargin = dp(top); p.bottomMargin = dp(bottom); p.leftMargin = dp(left); p.rightMargin = dp(right)
+        return p
+    }
+
+    private fun weighted(left: Int = 0): LinearLayout.LayoutParams {
+        val p = LinearLayout.LayoutParams(0, WRAP, 1f)
+        p.leftMargin = dp(left)
+        return p
+    }
+
+    private fun vbox(): LinearLayout { val l = LinearLayout(this); l.orientation = LinearLayout.VERTICAL; return l }
+    private fun hbox(): LinearLayout {
+        val l = LinearLayout(this); l.orientation = LinearLayout.HORIZONTAL; l.gravity = Gravity.CENTER_VERTICAL; return l
     }
 
     private fun page(): Pair<ScrollView, LinearLayout> {
         val sv = ScrollView(this)
-        val col = LinearLayout(this)
-        col.orientation = LinearLayout.VERTICAL
-        col.setPadding(dp(16), dp(20), dp(16), dp(28))
+        sv.isVerticalScrollBarEnabled = false
+        val col = vbox()
+        col.setPadding(dp(16), dp(22), dp(16), dp(28))
         sv.addView(col)
         return sv to col
     }
 
-    private fun title(parent: LinearLayout, s: String, sub: String? = null) {
-        parent.addView(label(s, 24f, Ui.TEXT, true))
-        if (sub != null) parent.addView(label(sub, 13f, Ui.SUB))
-        val sp = View(this)
-        parent.addView(sp, LinearLayout.LayoutParams(1, dp(12)))
+    private fun header(parent: LinearLayout, title: String, sub: String?) {
+        val h = vbox()
+        h.setPadding(dp(4), 0, dp(4), 0)
+        if (sub != null) h.addView(label(sub, 13f, Ui.SUB), lp(bottom = 4))
+        h.addView(label(title, 22f, Ui.TEXT, true))
+        parent.addView(h, lp(bottom = 14))
     }
 
-    private fun card(parent: LinearLayout, heading: String? = null): LinearLayout {
-        val c = LinearLayout(this)
-        c.orientation = LinearLayout.VERTICAL
-        c.background = rounded(Color.WHITE, 18)
-        c.setPadding(dp(16), dp(14), dp(16), dp(14))
-        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp.bottomMargin = dp(12)
-        parent.addView(c, lp)
-        if (heading != null) {
-            val h = label(heading, 13f, Ui.SUB, true)
-            h.setPadding(0, 0, 0, dp(6))
-            c.addView(h)
-        }
+    private fun card(parent: LinearLayout, heading: String? = null, color: Int = Ui.CARD, radius: Int = 22): LinearLayout {
+        val c = vbox()
+        c.background = rounded(color, radius)
+        c.setPadding(dp(18), dp(16), dp(18), dp(16))
+        parent.addView(c, lp(bottom = 12))
+        if (heading != null) c.addView(label(heading, 14f, Ui.TEXT2, true), lp(bottom = 6))
         return c
     }
 
-    private fun button(parent: LinearLayout, s: String, primary: Boolean = true, onClick: () -> Unit): TextView {
-        val b = label(s, 15f, if (primary) Color.WHITE else Ui.TEXT, true)
+    /** style 0: 검정, 1: 연회색, 2: 청록 */
+    private fun button(parent: LinearLayout, s: String, style: Int = 0, onClick: () -> Unit): TextView {
+        val bg = when (style) { 0 -> Ui.TEXT; 2 -> Ui.TEAL; else -> Ui.SOFT }
+        val fg = if (style == 1) Ui.TEXT else Color.WHITE
+        val b = label(s, 15f, fg, true)
         b.gravity = Gravity.CENTER
-        b.background = rounded(if (primary) Ui.TEAL else Ui.CHIP, 12)
-        b.setPadding(dp(12), dp(13), dp(12), dp(13))
+        b.background = rounded(bg, 14)
+        b.setPadding(dp(14), dp(14), dp(14), dp(14))
         b.setOnClickListener { onClick() }
-        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp.topMargin = dp(8)
-        parent.addView(b, lp)
+        parent.addView(b, lp(top = 8))
         return b
     }
 
-    private fun buttonRow(parent: LinearLayout, items: List<Pair<String, () -> Unit>>) {
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        items.forEachIndexed { i, (s, f) ->
-            val b = label(s, 14f, Ui.TEXT, true)
-            b.gravity = Gravity.CENTER
-            b.background = rounded(Ui.CHIP, 12)
-            b.setPadding(dp(8), dp(12), dp(8), dp(12))
-            b.setOnClickListener { f() }
-            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            if (i > 0) lp.leftMargin = dp(8)
-            row.addView(b, lp)
+    private fun chip(text: String, zone: Int): TextView {
+        val bg: Int
+        val fg: Int
+        when (zone) {
+            0 -> { bg = Ui.LOW_CHIP; fg = Ui.LOW_TEXT }
+            1 -> { bg = Ui.TEAL_BG; fg = 0xFF0B6B60.toInt() }
+            2 -> { bg = Ui.HIGH_CHIP; fg = Ui.HIGH_TEXT }
+            else -> { bg = Ui.INFO_CHIP; fg = Ui.TEXT2 }
         }
-        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp.bottomMargin = dp(12)
-        parent.addView(row, lp)
+        val c = label(text, 12f, fg, true)
+        c.background = rounded(bg, 8)
+        c.setPadding(dp(8), dp(4), dp(8), dp(4))
+        return c
     }
 
-    private fun chips(parent: LinearLayout, items: List<String>, selected: Int, onPick: (Int) -> Unit) {
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
+    private fun segmented(parent: LinearLayout, items: List<String>, selected: Int, onPick: (Int) -> Unit) {
+        val row = hbox()
+        row.background = rounded(Ui.CARD, 14)
+        row.setPadding(dp(4), dp(4), dp(4), dp(4))
         items.forEachIndexed { i, s ->
             val on = i == selected
-            val b = label(s, 13f, if (on) Color.WHITE else Ui.TEXT, on)
+            val b = label(s, 13f, if (on) Color.WHITE else Ui.SUB, on)
             b.gravity = Gravity.CENTER
-            b.background = rounded(if (on) Ui.TEAL else Color.WHITE, 20)
-            b.setPadding(dp(4), dp(8), dp(4), dp(8))
+            if (on) b.background = rounded(Ui.TEXT, 10)
+            b.setPadding(0, dp(10), 0, dp(10))
             b.setOnClickListener { onPick(i) }
-            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            if (i > 0) lp.leftMargin = dp(6)
-            row.addView(b, lp)
+            row.addView(b, weighted())
         }
-        val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp.bottomMargin = dp(10)
-        parent.addView(row, lp)
+        parent.addView(row, lp(bottom = 12))
     }
 
-    private fun metricRow(parent: LinearLayout, name: String, value: String, grade: Pair<String, Int>? = null) {
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        row.gravity = Gravity.CENTER_VERTICAL
-        row.setPadding(0, dp(9), 0, dp(9))
-        row.addView(label(name, 15f, Ui.SUB), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        row.addView(label(value, 16f, Ui.TEXT, true))
-        if (grade != null) {
-            val chip = label(grade.first, 12f, Color.WHITE, true)
-            chip.background = rounded(grade.second, 10)
-            chip.setPadding(dp(8), dp(3), dp(8), dp(3))
-            val lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            lp.leftMargin = dp(8)
-            row.addView(chip, lp)
-        }
-        parent.addView(row)
-        val line = View(this)
-        line.setBackgroundColor(Ui.LINE)
-        parent.addView(line, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1))
+    private fun divider(parent: LinearLayout) {
+        val v = View(this)
+        v.setBackgroundColor(0xFFEEF2F1.toInt())
+        parent.addView(v, LinearLayout.LayoutParams(MATCH, 1))
+    }
+
+    private fun kvRow(parent: LinearLayout, k: String, v: String) {
+        val r = hbox()
+        r.setPadding(0, dp(11), 0, dp(11))
+        r.addView(label(k, 15f, Ui.SUB), weighted())
+        r.addView(label(v, 16f, Ui.TEXT, true))
+        parent.addView(r)
+        divider(parent)
     }
 
     private fun field(parent: LinearLayout, name: String, value: String, type: Int): EditText {
-        parent.addView(label(name, 13f, Ui.SUB))
+        parent.addView(label(name, 13f, Ui.SUB), lp(top = 8))
         val e = EditText(this)
         e.setText(value)
         e.inputType = type
         e.textSize = 16f
         e.setSingleLine()
-        parent.addView(e, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        parent.addView(e, lp())
         return e
     }
 
     private fun switchRow(parent: LinearLayout, name: String, desc: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-        val row = LinearLayout(this)
-        row.orientation = LinearLayout.HORIZONTAL
-        row.gravity = Gravity.CENTER_VERTICAL
-        row.setPadding(0, dp(6), 0, dp(6))
-        val texts = LinearLayout(this)
-        texts.orientation = LinearLayout.VERTICAL
-        texts.addView(label(name, 15f))
+        val row = hbox()
+        row.setPadding(0, dp(8), 0, dp(8))
+        val texts = vbox()
+        texts.addView(label(name, 15f), lp(bottom = 3))
         texts.addView(label(desc, 12f, Ui.SUB))
-        row.addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(texts, weighted())
         val sw = Switch(this)
         sw.isChecked = checked
         sw.setOnCheckedChangeListener { _, v -> onChange(v) }
@@ -300,173 +336,433 @@ class MainActivity : Activity(), ScaleBle.Listener {
     }
 
     private fun f1(v: Double) = String.format(Locale.KOREA, "%.1f", v)
-    private fun f2(v: Double) = String.format(Locale.KOREA, "%.2f", v)
     private fun signed(v: Double, unit: String): String {
-        val arrow = when { v > 0.05 -> "▲ "; v < -0.05 -> "▼ "; else -> "" }
+        val arrow = when { v > 0.05 -> "▲ "; v < -0.05 -> "▼ "; else -> "― " }
         return arrow + f1(abs(v)) + unit
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
 
-    // ───────────────────────── 탭 전환
+    // ───────────────────────── 탭
 
     private fun showTab(i: Int) {
         currentTab = i
         tabs.forEachIndexed { idx, tv ->
-            tv.setTextColor(if (idx == i) Ui.TEAL else Ui.SUB)
-            tv.setTypeface(null, if (idx == i) Typeface.BOLD else Typeface.NORMAL)
+            val on = idx == i
+            tv.setTextColor(if (on) Ui.TEAL_DARK else Ui.SUB)
+            tv.setTypeface(null, if (on) Typeface.BOLD else Typeface.NORMAL)
+            val icon = tv.compoundDrawables[1]
+            if (icon is NavIcon) icon.active = on
         }
-        vStatus = null; vWeight = null; vSub = null; vResult = null
+        vLiveWeight = null; vRing = null; vConn = null
         content.removeAllViews()
-        val v = when (i) {
-            0 -> buildMeasure()
-            1 -> buildRecords()
-            2 -> buildGraph()
+        val live = i == 0 && !showingDetail && lastMeasure == null && liveWeight != null
+        window.statusBarColor = if (live) Ui.DARK else Ui.BG
+        window.decorView.systemUiVisibility = if (live) View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+        val v = when {
+            i == 0 && showingDetail -> buildDetail()
+            i == 0 && live -> buildLive()
+            i == 0 -> buildHome()
+            i == 1 -> buildRecords()
+            i == 2 -> buildTrend()
             else -> buildSettings()
         }
         content.addView(v)
     }
 
-    // ───────────────────────── 측정 화면
+    private fun refreshHome() {
+        if (currentTab == 0 && !showingDetail) showTab(0)
+    }
 
-    private fun buildMeasure(): View {
+    // ───────────────────────── 측정 중
+
+    private fun buildLive(): View {
+        val root = vbox()
+        root.setBackgroundColor(Ui.DARK)
+        root.gravity = Gravity.CENTER_HORIZONTAL
+        root.setPadding(dp(24), dp(24), dp(24), dp(24))
+
+        val top = hbox()
+        top.addView(label("측정 중", 15f, Color.WHITE, true), weighted())
+        val conn = label("● " + prefs.deviceName.ifEmpty { "체중계" }, 12f, 0xFF9FD8CF.toInt())
+        conn.background = rounded(0xFF1B2B27.toInt(), 99)
+        conn.setPadding(dp(10), dp(6), dp(10), dp(6))
+        top.addView(conn)
+        root.addView(top, lp())
+
+        val size = dp(270)
+        val ringBox = FrameLayout(this)
+        val ring = RingView(this)
+        ring.progress = ((System.currentTimeMillis() - liveStart) / 6000f).coerceIn(0.08f, 0.92f)
+        ringBox.addView(ring, FrameLayout.LayoutParams(size, size))
+        val center = vbox()
+        center.gravity = Gravity.CENTER
+        center.addView(label("체중", 13f, Ui.MUTED_DARK), lp(WRAP, bottom = 6))
+        val wRow = hbox()
+        wRow.gravity = Gravity.BOTTOM
+        val wv = heavy(f1(liveWeight ?: 0.0), 62f, Color.WHITE)
+        wRow.addView(wv)
+        wRow.addView(label(" kg", 20f, Ui.MUTED_DARK, true), lp(WRAP, bottom = 8))
+        center.addView(wRow, lp(WRAP))
+        center.addView(label("체성분 분석 중…", 13f, Ui.MINT, true), lp(WRAP, top = 6))
+        ringBox.addView(center, FrameLayout.LayoutParams(size, size))
+        root.addView(ringBox, lp(size, size, top = 48))
+        vLiveWeight = wv
+        vRing = ring
+
+        val t1 = label("움직이지 말고 그대로 서 계세요", 20f, Color.WHITE, true)
+        t1.gravity = Gravity.CENTER
+        root.addView(t1, lp(top = 32))
+        val t2 = label("맨발로 발판 전극에 발을 고르게 올려야\n체지방과 근육량이 정확하게 나와요", 14f, Ui.MUTED_DARK)
+        t2.gravity = Gravity.CENTER
+        root.addView(t2, lp(top = 10))
+
+        root.addView(View(this), LinearLayout.LayoutParams(1, 0, 1f))
+
+        val steps = vbox()
+        steps.background = rounded(Ui.DARK2, 20)
+        steps.setPadding(dp(18), dp(12), dp(18), dp(12))
+        stepRow(steps, "체중 측정", "진행 중", true)
+        stepRow(steps, "임피던스 측정", "대기", false)
+        stepRow(steps, "체성분 계산", "대기", false)
+        root.addView(steps, lp())
+        return root
+    }
+
+    private fun stepRow(parent: LinearLayout, name: String, state: String, on: Boolean) {
+        val r = hbox()
+        r.setPadding(0, dp(8), 0, dp(8))
+        val dot = View(this)
+        val g = GradientDrawable()
+        g.shape = GradientDrawable.OVAL
+        if (on) g.setColor(Ui.MINT) else { g.setColor(Color.TRANSPARENT); g.setStroke(dp(2), 0xFF3A4D48.toInt()) }
+        dot.background = g
+        r.addView(dot, lp(dp(18), dp(18), right = 12))
+        val off = 0xFF7F948E.toInt()
+        r.addView(label(name, 15f, if (on) Color.WHITE else off, on), weighted())
+        r.addView(label(state, 13f, if (on) Ui.MINT else off))
+        parent.addView(r)
+    }
+
+    // ───────────────────────── 홈
+
+    private class Shown(val ts: Long, val weight: Double, val res: Int, val sfat: Double?)
+
+    /** 방금 측정한 값, 없으면 마지막 기록 */
+    private fun currentData(): Shown? {
+        val m = lastMeasure
+        if (m != null) return Shown(m.ts, m.weight, m.res, m.sfat)
+        val r = db.all().firstOrNull() ?: return null
+        return Shown(r.ts, r.weight, r.res, r.sfat)
+    }
+
+    private fun greeting(): String = when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {
+        in 5..10 -> "좋은 아침이에요"
+        in 11..16 -> "좋은 오후예요"
+        in 17..21 -> "좋은 저녁이에요"
+        else -> "편안한 밤 되세요"
+    }
+
+    private fun buildHome(): View {
         val (sv, col) = page()
-        val hello = if (prefs.name.isNotEmpty()) "${prefs.name}님" else "내 체중계"
-        title(col, hello, fullDate.format(Date()))
 
-        val c1 = card(col, "체중계")
-        c1.addView(label(if (prefs.deviceAddr.isEmpty()) "등록된 체중계가 없어요" else "🔗 ${prefs.deviceName}", 14f, Ui.SUB))
-        val st = label(statusText, 16f, if (bleConnected) Ui.TEAL else Ui.TEXT, true)
-        st.setPadding(0, dp(4), 0, 0)
-        c1.addView(st)
-        vStatus = st
+        val head = hbox()
+        head.gravity = Gravity.TOP
+        val hl = vbox()
+        hl.addView(label(dateHead.format(Date()), 13f, Ui.SUB), lp(bottom = 4))
+        hl.addView(label(if (prefs.name.isEmpty()) greeting() else "${prefs.name}님, ${greeting()}", 21f, Ui.TEXT, true))
+        head.addView(hl, weighted())
+        val pill = label(
+            if (bleConnected) "● 연결됨" else if (prefs.deviceAddr.isEmpty()) "기기 없음" else "○ 대기",
+            12f, if (bleConnected) Ui.TEAL_DARK else Ui.SUB, true
+        )
+        pill.background = rounded(Ui.CARD, 99)
+        pill.setPadding(dp(10), dp(6), dp(10), dp(6))
+        pill.setOnClickListener { showTab(3) }
+        head.addView(pill)
+        vConn = pill
+        col.addView(head, lp(bottom = 14))
+
+        val data = currentData()
         if (prefs.deviceAddr.isEmpty()) {
-            button(c1, "체중계 찾기") { startScan() }
-        } else if (!bleConnected) {
-            button(c1, "다시 연결", false) { ensurePerms { ensureBtOn { ble.connect(prefs.deviceAddr) } } }
+            val c = card(col)
+            c.addView(label("체중계를 연결해 주세요", 17f, Ui.TEXT, true), lp(bottom = 6))
+            c.addView(label("체중계에 올라가면 자동으로 측정하고 기록해요.", 14f, Ui.SUB))
+            button(c, "체중계 찾기", 2) { startScan() }
         }
 
-        val c2 = card(col)
-        val w = label("-- kg", 54f, Ui.TEXT, true)
-        w.gravity = Gravity.CENTER_HORIZONTAL
-        c2.addView(w, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        val s = label("", 14f, Ui.SUB)
-        s.gravity = Gravity.CENTER_HORIZONTAL
-        c2.addView(s, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        vWeight = w; vSub = s
+        if (data == null) {
+            val c = card(col, "측정 팁")
+            c.addView(label("• 아침 공복, 화장실 다녀온 뒤 같은 시간에 재면 추세가 정확해요\n• 맨발로 발판 전극에 발을 고르게 올리세요\n• 운동·샤워 직후엔 체지방이 다르게 나올 수 있어요", 14f, Ui.TEXT2))
+            return sv
+        }
+        val body = BodyCalc.calc(data.weight, data.res, data.sfat, prefs)
 
-        val res = LinearLayout(this)
-        res.orientation = LinearLayout.VERTICAL
-        col.addView(res)
-        vResult = res
+        // 체중 카드
+        val wc = hbox()
+        wc.gravity = Gravity.BOTTOM
+        wc.background = rounded(Ui.CARD, 24)
+        wc.setPadding(dp(20), dp(18), dp(20), dp(18))
+        val wl = vbox()
+        val isNew = lastMeasure != null
+        wl.addView(label(if (isNew) "방금 측정한 체중" else "마지막 체중 · " + fullDate.format(Date(data.ts)), 13f, Ui.SUB), lp(bottom = 6))
+        val wr = hbox()
+        wr.gravity = Gravity.BOTTOM
+        wr.addView(heavy(f1(data.weight), 46f))
+        wr.addView(label(" kg", 18f, Ui.TEXT2, true), lp(WRAP, bottom = 6))
+        wl.addView(wr, lp(WRAP))
+        val prev = db.all().firstOrNull { it.ts < data.ts - 1000 }
+        if (prev != null) {
+            val dlt = label(signed(data.weight - prev.weight, "kg") + " · 지난 측정보다", 12f, Ui.TEAL_DARK, true)
+            dlt.background = rounded(Ui.TEAL_BG, 8)
+            dlt.setPadding(dp(8), dp(4), dp(8), dp(4))
+            wl.addView(dlt, lp(WRAP, top = 8))
+        }
+        wc.addView(wl, weighted())
+        if (prefs.goal > 0) {
+            val gl = vbox()
+            gl.gravity = Gravity.END
+            val remain = data.weight - prefs.goal
+            gl.addView(label("목표 ${f1(prefs.goal.toDouble())}kg까지", 12f, Ui.SUB), lp(WRAP, bottom = 4))
+            gl.addView(label(if (abs(remain) < 0.1) "달성!" else f1(abs(remain)) + "kg", 18f, Ui.TEXT, true), lp(WRAP, bottom = 8))
+            val first = db.all().lastOrNull()?.weight ?: data.weight
+            val total = abs(first - prefs.goal)
+            val prog = if (total < 0.1) 1.0 else (1.0 - abs(remain) / total).coerceIn(0.03, 1.0)
+            val track = FrameLayout(this)
+            track.background = rounded(Ui.LINE, 3)
+            val fill = View(this)
+            fill.background = rounded(Ui.TEAL, 3)
+            track.addView(fill, FrameLayout.LayoutParams((dp(116) * prog).toInt(), dp(6)))
+            gl.addView(track, lp(dp(116), dp(6)))
+            wc.addView(gl)
+        }
+        col.addView(wc, lp(bottom = 12))
 
-        renderMeasure()
+        if (body == null) {
+            val c = card(col)
+            c.addView(label("내 정보에서 키·출생연도·성별을 입력하면\n체성분과 기준을 보여드려요.", 15f, Ui.TEXT))
+            button(c, "내 정보 입력", 0) { showTab(3) }
+            return sv
+        }
+
+        // 인체 그림 카드
+        val fig = FrameLayout(this)
+        fig.background = rounded(Ui.FIG_BG, 24, 0xFFE3EAE8.toInt())
+        val img = ImageView(this)
+        img.setImageResource(R.drawable.body)
+        img.scaleType = ImageView.ScaleType.FIT_START
+        img.contentDescription = "전신 인체 그림"
+        val imgLp = FrameLayout.LayoutParams(dp(220), dp(330))
+        imgLp.gravity = Gravity.BOTTOM or Gravity.START
+        imgLp.leftMargin = -dp(10)
+        fig.addView(img, imgLp)
+
+        val typeBox = vbox()
+        typeBox.setPadding(dp(16), dp(14), 0, 0)
+        val bt = BodyCalc.bodyType(body, prefs.male)
+        typeBox.addView(label("체형 분석", 12f, Ui.SUB), lp(WRAP, bottom = 3))
+        typeBox.addView(label(if (bt != null) BodyCalc.typeLabels[bt.first][bt.second] else "BMI " + BodyCalc.bmiLabel(body.bmi), 17f, Ui.TEXT, true))
+        fig.addView(typeBox, FrameLayout.LayoutParams(WRAP, WRAP))
+
+        val side = vbox()
+        val sideLp = FrameLayout.LayoutParams(dp(152), WRAP)
+        sideLp.gravity = Gravity.END or Gravity.TOP
+        sideLp.topMargin = dp(14); sideLp.rightMargin = dp(12)
+        val all = BodyCalc.metrics(data.weight, body, prefs.male).flatMap { it.second }
+        for (n in listOf("체지방률", "근육량", "BMI", "기초대사량")) {
+            val m = all.firstOrNull { it.name == n } ?: continue
+            side.addView(miniCard(m), lp(bottom = 8))
+        }
+        if (body.fatPct == null) {
+            side.addView(label(if (data.res <= 0) "맨발로 측정하면 체지방·근육량도 나와요" else "체지방을 계산하지 못했어요", 12f, Ui.HIGH_TEXT), lp(top = 4))
+        }
+        fig.addView(side, sideLp)
+        col.addView(fig, lp(h = dp(400), bottom = 12))
+
+        // 요약
+        val ranged = all.filter { it.hasRange }
+        val inStd = ranged.count { it.zone == 1 }
+        val sum = hbox()
+        sum.background = rounded(Ui.CARD, 20)
+        sum.setPadding(dp(18), dp(14), dp(14), dp(14))
+        val sl = vbox()
+        sl.addView(label("표준 범위 안", 13f, Ui.SUB), lp(bottom = 3))
+        sl.addView(label("${ranged.size}개 중 ${inStd}개 항목", 17f, Ui.TEXT, true))
+        sum.addView(sl, weighted())
+        val go = label("상세 분석 보기", 14f, Color.WHITE, true)
+        go.background = rounded(Ui.TEXT, 14)
+        go.setPadding(dp(16), dp(12), dp(16), dp(12))
+        go.setOnClickListener { showingDetail = true; showTab(0) }
+        sum.addView(go)
+        col.addView(sum, lp(bottom = 12))
+
+        val m = lastMeasure
+        if (m != null) {
+            if (!m.saved) button(col, "이 측정 기록 저장", 2) { saveMeasure(m); refreshHome() }
+            else {
+                val ok = label("✓ 기록에 저장됨 · " + timeOnly.format(Date(m.ts)), 13f, Ui.TEAL_DARK, true)
+                ok.gravity = Gravity.CENTER
+                col.addView(ok, lp(top = 4))
+            }
+        }
         return sv
     }
 
-    private fun renderMeasure() {
-        val w = vWeight ?: return
-        val s = vSub ?: return
-        val res = vResult ?: return
-        res.removeAllViews()
-        val m = lastMeasure
-        if (m == null) {
-            val lw = liveWeight
-            if (lw != null) {
-                w.text = f2(lw) + " kg"
-                w.setTextColor(Ui.SUB)
-                s.text = "측정 중… 움직이지 말고 서 계세요"
-            } else {
-                val last = db.all().firstOrNull()
-                w.text = if (last != null) f2(last.weight) + " kg" else "-- kg"
-                w.setTextColor(if (last != null) Ui.SUB else Ui.LINE)
-                s.text = if (last != null) "마지막 측정 · ${fullDate.format(Date(last.ts))}" else "체중계에 맨발로 올라가면 자동으로 측정돼요"
-                val tip = card(res, "측정 팁")
-                tip.addView(label("• 아침 공복, 화장실 다녀온 뒤 같은 시간에 재면 추세가 정확해요\n• 체성분은 맨발로, 손잡이를 양손으로 잡고 측정하세요\n• 운동·샤워 직후엔 수분 때문에 체지방이 다르게 나올 수 있어요", 14f, Ui.TEXT))
+    private fun miniCard(m: Metric): View {
+        val c = vbox()
+        c.background = rounded(Ui.CARD, 16)
+        c.setPadding(dp(12), dp(10), dp(12), dp(10))
+        val top = hbox()
+        top.addView(label(m.name, 12f, Ui.SUB), weighted())
+        val gc = when (m.zone) { 0 -> Ui.LOW_TEXT; 1 -> Ui.TEAL_DARK; 2 -> Ui.HIGH_TEXT; else -> Ui.SUB }
+        val gt = if (m.zone >= 0) m.grade else if (m.unit == "kcal") "하루" else "추정"
+        top.addView(label(gt, 11f, gc, true))
+        c.addView(top, lp(bottom = 4))
+        c.addView(label(m.text(), 19f, Ui.TEXT, true))
+        if (m.hasRange) {
+            val zb = ZoneBarView(this)
+            zb.setZone(m.zone)
+            c.addView(zb, lp(top = 6))
+        }
+        return c
+    }
+
+    // ───────────────────────── 상세 분석
+
+    private fun buildDetail(): View {
+        val (sv, col) = page()
+        val data = currentData()
+
+        val back = hbox()
+        val bb = label("‹", 26f, Ui.TEXT, true)
+        bb.gravity = Gravity.CENTER
+        bb.background = rounded(Ui.CARD, 12)
+        bb.contentDescription = "뒤로"
+        bb.setOnClickListener { showingDetail = false; showTab(0) }
+        back.addView(bb, lp(dp(42), dp(42), right = 10))
+        val bt = vbox()
+        bt.addView(label("상세 분석", 20f, Ui.TEXT, true), lp(bottom = 3))
+        val who = "${if (prefs.male) "남성" else "여성"} · ${f1(prefs.heightCm.toDouble())}cm · ${prefs.age}세"
+        bt.addView(label((if (data != null) fullDate.format(Date(data.ts)) + " · " else "") + who, 12f, Ui.SUB))
+        back.addView(bt, weighted())
+        col.addView(back, lp(bottom = 14))
+
+        if (data == null) { col.addView(label("측정 기록이 없어요.", 15f, Ui.SUB)); return sv }
+        val body = BodyCalc.calc(data.weight, data.res, data.sfat, prefs)
+        if (body == null) { col.addView(label("내 정보를 먼저 입력해 주세요.", 15f, Ui.SUB)); return sv }
+
+        val legend = hbox()
+        legend.setPadding(dp(4), 0, 0, 0)
+        for ((t, c) in listOf("표준 이하" to Ui.LOW_BG, "표준" to Ui.STD_BG, "표준 이상" to Ui.HIGH_BG)) {
+            val sw = View(this)
+            sw.background = rounded(c, 3)
+            legend.addView(sw, lp(dp(10), dp(10), right = 5))
+            legend.addView(label(t, 12f, Ui.TEXT2), lp(WRAP, right = 14))
+        }
+        col.addView(legend, lp(bottom = 12))
+
+        for ((title, list) in BodyCalc.metrics(data.weight, body, prefs.male)) {
+            if (list.isEmpty()) continue
+            val c = card(col, title)
+            c.setPadding(dp(18), dp(16), dp(18), dp(6))
+            list.forEachIndexed { i, m ->
+                val r = vbox()
+                r.setPadding(0, dp(12), 0, dp(12))
+                val top = hbox()
+                top.addView(label(m.name, 15f, Ui.TEXT), weighted())
+                top.addView(label(m.text(), 19f, Ui.TEXT, true), lp(WRAP, right = 8))
+                top.addView(chip(m.grade, m.zone))
+                r.addView(top, lp())
+                val lo = m.lo
+                val hi = m.hi
+                if (lo != null && hi != null) {
+                    val zb = ZoneBarView(this)
+                    zb.setValue(m.value, lo, hi)
+                    r.addView(zb, lp(top = 10))
+                }
+                r.addView(label(m.note, 12f, Ui.SUB), lp(top = 8))
+                c.addView(r)
+                if (i < list.size - 1) divider(c)
             }
-            return
         }
 
-        w.text = f2(m.weight) + " kg"
-        w.setTextColor(Ui.TEXT)
-        val prev = db.all().firstOrNull { it.id != lastSavedId && it.ts < m.ts - 1000 }
-        val parts = ArrayList<String>()
-        parts.add(timeOnly.format(Date(m.ts)) + " 측정")
-        if (prev != null) parts.add("지난번보다 " + signed(m.weight - prev.weight, "kg"))
-        s.text = parts.joinToString(" · ")
-
-        val body = BodyCalc.calc(m.weight, m.res, m.sfat, prefs)
-        if (body == null) {
-            val c = card(res, "체성분")
-            c.addView(label("설정에서 키·출생연도·성별을 입력하면 BMI와 체성분을 계산해 드려요.", 14f))
-            button(c, "프로필 입력하기") { showTab(3) }
-        } else {
-            renderBody(res, m.weight, m.res, body)
+        // 체형 분석표
+        val tc = card(col)
+        val th = hbox()
+        th.addView(label("체형 분석", 14f, Ui.TEXT2, true), weighted())
+        th.addView(label("BMI × 체지방률", 12f, Ui.SUB))
+        tc.addView(th, lp(bottom = 10))
+        val type = BodyCalc.bodyType(body, prefs.male)
+        val hdr = hbox()
+        hdr.addView(View(this), lp(dp(50), 1))
+        for (t in listOf("BMI 낮음", "표준", "높음")) {
+            val l = label(t, 12f, Ui.SUB)
+            l.gravity = Gravity.CENTER
+            hdr.addView(l, weighted())
         }
-
-        if (prefs.goal > 0) {
-            val c = card(res, "목표")
-            val diff = m.weight - prefs.goal
-            metricRow(c, "목표 체중", f1(prefs.goal.toDouble()) + " kg")
-            metricRow(c, "남은 양", if (abs(diff) < 0.1) "달성! 🎉" else signed(-diff, "kg"))
+        tc.addView(hdr, lp(bottom = 4))
+        val rowNames = listOf("체지방\n높음", "표준", "낮음")
+        val rowIdx = listOf(2, 1, 0)
+        for (k in 0..2) {
+            val r = hbox()
+            r.addView(label(rowNames[k], 12f, Ui.SUB), lp(dp(50), WRAP))
+            for (cIdx in 0..2) {
+                val on = type != null && type.first == rowIdx[k] && type.second == cIdx
+                val cell = label(BodyCalc.typeLabels[rowIdx[k]][cIdx], 12f, if (on) Color.WHITE else Ui.SUB, on)
+                cell.gravity = Gravity.CENTER
+                cell.background = rounded(if (on) Ui.TEXT else Ui.SOFT, 10)
+                cell.setPadding(dp(2), dp(13), dp(2), dp(13))
+                r.addView(cell, weighted(4))
+            }
+            tc.addView(r, lp(bottom = 4))
         }
+        val note = if (type != null) BodyCalc.typeNotes[type.first][type.second]
+        else "체지방률이 있어야 체형을 분석할 수 있어요. 맨발로 측정해 주세요."
+        tc.addView(label(note, 14f, Ui.TEXT2), lp(top = 8))
 
-        if (!m.saved) {
-            button(res, "이 측정 기록 저장") { saveMeasure(m); renderMeasure() }
-        } else {
-            val ok = label("✓ 기록에 저장됨", 13f, Ui.TEAL, true)
-            ok.gravity = Gravity.CENTER_HORIZONTAL
-            res.addView(ok, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
-        button(res, "새로 측정하기", false) { lastMeasure = null; liveWeight = null; renderMeasure() }
+        val (flo, fhi) = BodyCalc.fatRange(prefs.male)
+        val foot = label(
+            "표준 범위: BMI는 대한비만학회 기준(18.5~22.9 정상, 23~24.9 비만 전단계), 체지방률은 " +
+                "${if (prefs.male) "남성" else "여성"} ${flo.toInt()}~${fhi.toInt()}%를 사용해요. " +
+                "가정용 체중계의 체성분 값은 추정치이니 변화 추이로 보세요.", 12f, Ui.SUB
+        )
+        foot.setPadding(dp(6), dp(4), dp(6), 0)
+        col.addView(foot)
+        return sv
     }
 
-    private fun renderBody(parent: LinearLayout, weight: Double, resistance: Int, b: Body) {
-        val c = card(parent, "체성분 분석 (추정)")
-        metricRow(c, "BMI", f1(b.bmi), BodyCalc.bmiGrade(b.bmi))
-        val fat = b.fatPct
-        if (fat != null) {
-            metricRow(c, "체지방률", f1(fat) + " %", BodyCalc.fatGrade(fat, prefs.male))
-            metricRow(c, "체지방량", f1(b.fatKg ?: 0.0) + " kg")
-            metricRow(c, "근육량", f1(b.muscleKg ?: 0.0) + " kg")
-            metricRow(c, "골격근 비율", f1(b.skeletalPct ?: 0.0) + " %")
-            metricRow(c, "체수분", f1(b.waterPct ?: 0.0) + " %")
-            metricRow(c, "제지방량", f1(b.lbm ?: 0.0) + " kg")
-        } else {
-            c.addView(label(if (resistance <= 0) "⚠ 임피던스 값이 없어요. 맨발로 다시 측정하면 체지방·근육량이 나와요." else "⚠ 체지방을 계산하지 못했어요.", 13f, Ui.ORANGE))
-        }
-        metricRow(c, "기초대사량", String.format(Locale.KOREA, "%,d kcal", b.bmr.toInt()))
-        metricRow(c, "표준 체중", f1(b.stdWeight) + " kg")
-        metricRow(c, "비만도", f1(b.obesity) + " %")
-        if (resistance > 0) metricRow(c, "임피던스", "$resistance Ω")
-        b.scaleFat?.let { metricRow(c, "체중계 제공 체지방(참고)", f1(it) + " %") }
-        val note = label("가정용 체중계의 체성분은 추정치예요. 절대값보다 변화 추이로 보세요.", 12f, Ui.SUB)
-        note.setPadding(0, dp(8), 0, 0)
-        c.addView(note)
-    }
-
-    // ───────────────────────── 기록 화면
+    // ───────────────────────── 기록
 
     private fun buildRecords(): View {
         val (sv, col) = page()
         val list = db.all()
-        title(col, "기록", "총 ${list.size}회 측정")
+        header(col, "기록", "총 ${list.size}회 측정")
 
         if (list.isNotEmpty()) {
             val now = System.currentTimeMillis()
             val c = card(col, "요약")
-            metricRow(c, "최근 체중", f2(list[0].weight) + " kg")
+            kvRow(c, "최근 체중", f1(list[0].weight) + " kg")
             val week = list.filter { it.ts >= now - 7 * 86_400_000L }
-            if (week.isNotEmpty()) metricRow(c, "최근 7일 평균", f2(week.map { it.weight }.average()) + " kg")
+            if (week.isNotEmpty()) kvRow(c, "최근 7일 평균", f1(week.map { it.weight }.average()) + " kg")
             val month = list.filter { it.ts >= now - 30 * 86_400_000L }
-            if (month.size >= 2) metricRow(c, "30일 변화", signed(month.first().weight - month.last().weight, "kg"))
-            if (list.size >= 2) metricRow(c, "처음 대비", signed(list.first().weight - list.last().weight, "kg"))
+            if (month.size >= 2) kvRow(c, "30일 변화", signed(month.first().weight - month.last().weight, "kg"))
+            if (list.size >= 2) kvRow(c, "처음 대비", signed(list.first().weight - list.last().weight, "kg"))
         }
 
-        buttonRow(col, listOf(
-            "✏️ 직접 입력" to { manualEntry() },
-            "📤 CSV 내보내기" to { exportCsv() }
-        ))
+        val row = hbox()
+        val b1 = label("직접 입력", 14f, Ui.TEXT, true)
+        val b2 = label("CSV 내보내기", 14f, Ui.TEXT, true)
+        for (b in listOf(b1, b2)) {
+            b.gravity = Gravity.CENTER
+            b.background = rounded(Ui.CARD, 14)
+            b.setPadding(0, dp(13), 0, dp(13))
+        }
+        b1.setOnClickListener { manualEntry() }
+        b2.setOnClickListener { exportCsv() }
+        row.addView(b1, weighted())
+        row.addView(b2, weighted(8))
+        col.addView(row, lp(bottom = 12))
 
         if (list.isEmpty()) {
             val c = card(col)
@@ -482,15 +778,13 @@ class MainActivity : Activity(), ScaleBle.Listener {
             if (day != lastDay) {
                 lastDay = day
                 g = card(col, day)
+                g.setPadding(dp(18), dp(14), dp(18), dp(6))
             }
             val body = BodyCalc.calc(r.weight, r.res, r.sfat, prefs)
-            val row = LinearLayout(this)
-            row.orientation = LinearLayout.HORIZONTAL
-            row.gravity = Gravity.CENTER_VERTICAL
-            row.setPadding(0, dp(10), 0, dp(10))
-            val left = LinearLayout(this)
-            left.orientation = LinearLayout.VERTICAL
-            left.addView(label(timeOnly.format(Date(r.ts)) + if (r.src == "수동") "  ✏️" else "", 14f, Ui.SUB))
+            val item = hbox()
+            item.setPadding(0, dp(10), 0, dp(10))
+            val left = vbox()
+            left.addView(label(timeOnly.format(Date(r.ts)) + (if (r.src == "수동") " · 직접 입력" else ""), 14f, Ui.SUB), lp(bottom = 3))
             val detail = ArrayList<String>()
             if (body != null) {
                 detail.add("BMI " + f1(body.bmi))
@@ -498,10 +792,10 @@ class MainActivity : Activity(), ScaleBle.Listener {
                 body.muscleKg?.let { detail.add("근육 " + f1(it) + "kg") }
             }
             if (detail.isNotEmpty()) left.addView(label(detail.joinToString(" · "), 12f, Ui.SUB))
-            row.addView(left, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            row.addView(label(f2(r.weight) + " kg", 18f, Ui.TEXT, true))
-            row.setOnClickListener { recordDetail(r) }
-            g.addView(row)
+            item.addView(left, weighted())
+            item.addView(label(f1(r.weight) + " kg", 18f, Ui.TEXT, true))
+            item.setOnClickListener { recordDetail(r) }
+            g.addView(item)
         }
         return sv
     }
@@ -509,17 +803,11 @@ class MainActivity : Activity(), ScaleBle.Listener {
     private fun recordDetail(r: Rec) {
         val b = BodyCalc.calc(r.weight, r.res, r.sfat, prefs)
         val sb = StringBuilder()
-        sb.append("체중: ${f2(r.weight)} kg\n")
         if (b != null) {
-            sb.append("BMI: ${f1(b.bmi)} (${BodyCalc.bmiGrade(b.bmi).first})\n")
-            b.fatPct?.let { sb.append("체지방률: ${f1(it)} % (${BodyCalc.fatGrade(it, prefs.male).first})\n") }
-            b.fatKg?.let { sb.append("체지방량: ${f1(it)} kg\n") }
-            b.muscleKg?.let { sb.append("근육량: ${f1(it)} kg\n") }
-            b.skeletalPct?.let { sb.append("골격근 비율: ${f1(it)} %\n") }
-            b.waterPct?.let { sb.append("체수분: ${f1(it)} %\n") }
-            b.lbm?.let { sb.append("제지방량: ${f1(it)} kg\n") }
-            sb.append("기초대사량: ${b.bmr.toInt()} kcal\n")
-        }
+            for (sec in BodyCalc.metrics(r.weight, b, prefs.male)) {
+                for (m in sec.second) sb.append("${m.name}: ${m.text()}  (${m.grade})\n")
+            }
+        } else sb.append("체중: ${f1(r.weight)} kg\n")
         if (r.res > 0) sb.append("임피던스: ${r.res} Ω\n")
         sb.append("입력 방식: ${r.src}")
         AlertDialog.Builder(this)
@@ -555,67 +843,112 @@ class MainActivity : Activity(), ScaleBle.Listener {
             .show()
     }
 
-    // ───────────────────────── 그래프 화면
+    // ───────────────────────── 추이
 
-    private fun buildGraph(): View {
+    private fun metricValue(r: Rec, metric: Int): Double? {
+        if (metric == 0) return r.weight
+        val b = BodyCalc.calc(r.weight, r.res, r.sfat, prefs) ?: return null
+        return when (metric) { 1 -> b.fatPct; 2 -> b.muscleKg; else -> b.bmi }
+    }
+
+    private fun buildTrend(): View {
         val (sv, col) = page()
-        title(col, "그래프")
-        val dayOpts = listOf(7, 30, 90, 365, 0)
-        chips(col, listOf("1주", "1개월", "3개월", "1년", "전체"), dayOpts.indexOf(graphDays).coerceAtLeast(0)) {
-            graphDays = dayOpts[it]; showTab(2)
-        }
-        chips(col, listOf("체중", "체지방률", "근육량", "BMI"), graphMetric) {
-            graphMetric = it; showTab(2)
-        }
-
+        val dayOpts = listOf(7, 30, 90, 365)
+        val sel = dayOpts.indexOf(graphDays).coerceAtLeast(0)
+        val periodName = listOf("최근 1주", "최근 30일", "최근 3개월", "최근 1년")[sel]
         val now = System.currentTimeMillis()
-        val recs = db.all().filter { graphDays == 0 || it.ts >= now - graphDays * 86_400_000L }
-        val pts = ArrayList<Pair<Long, Double>>()
-        for (r in recs) {
-            val v: Double? = when (graphMetric) {
-                0 -> r.weight
-                else -> {
-                    val b = BodyCalc.calc(r.weight, r.res, r.sfat, prefs)
-                    when (graphMetric) {
-                        1 -> b?.fatPct
-                        2 -> b?.muscleKg
-                        else -> b?.bmi
-                    }
-                }
-            }
-            if (v != null) pts.add(r.ts to v)
+        val recs = db.all().filter { it.ts >= now - graphDays * 86_400_000L }.sortedBy { it.ts }
+        header(col, "변화 추이", "$periodName · ${recs.size}회 측정")
+        segmented(col, listOf("1주", "1개월", "3개월", "1년"), sel) { graphDays = dayOpts[it]; showTab(2) }
+
+        val names = listOf("체중", "체지방률", "근육량", "BMI")
+        val units = listOf("kg", "%", "kg", "")
+        val series = (0..3).map { m -> recs.mapNotNull { r -> metricValue(r, m)?.let { v -> r.ts to v } } }
+
+        fun changeUnit(m: Int) = if (m == 1) "%p" else units[m]
+        fun isGood(m: Int, ch: Double) = if (m == 2) ch >= -0.05 else ch <= 0.05
+
+        val main = series[graphMetric]
+        val c = card(col, radius = 24)
+        val top = hbox()
+        top.gravity = Gravity.BOTTOM
+        val tl = vbox()
+        tl.addView(label(names[graphMetric], 13f, Ui.SUB), lp(bottom = 4))
+        val vr = hbox()
+        vr.gravity = Gravity.BOTTOM
+        vr.addView(heavy(if (main.isEmpty()) "--" else f1(main.last().second), 28f))
+        vr.addView(label(" " + units[graphMetric], 15f, Ui.SUB, true), lp(WRAP, bottom = 3))
+        tl.addView(vr, lp(WRAP))
+        top.addView(tl, weighted())
+        if (main.size >= 2) {
+            val ch = main.last().second - main.first().second
+            val good = isGood(graphMetric, ch)
+            val t = label(signed(ch, changeUnit(graphMetric)), 13f, if (good) Ui.TEAL_DARK else Ui.HIGH_TEXT, true)
+            t.background = rounded(if (good) Ui.TEAL_BG else Ui.HIGH_CHIP, 8)
+            t.setPadding(dp(9), dp(5), dp(9), dp(5))
+            top.addView(t)
         }
-        val unit = when (graphMetric) { 1 -> "%"; 3 -> ""; else -> "kg" }
-
-        val c = card(col)
+        c.addView(top, lp(bottom = 10))
         val chart = ChartView(this)
-        chart.setData(pts, if (graphMetric == 0 && prefs.goal > 0) prefs.goal.toDouble() else null, unit)
-        c.addView(chart, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        chart.setData(main, if (graphMetric == 0 && prefs.goal > 0) prefs.goal.toDouble() else null, units[graphMetric])
+        c.addView(chart, lp())
 
-        if (pts.isNotEmpty()) {
-            val sorted = pts.sortedBy { it.first }
-            val st = card(col, "이 기간 통계")
-            metricRow(st, "측정 횟수", "${pts.size}회")
-            metricRow(st, "최저", f1(pts.minOf { it.second }) + unit)
-            metricRow(st, "최고", f1(pts.maxOf { it.second }) + unit)
-            metricRow(st, "평균", f1(pts.map { it.second }.average()) + unit)
-            if (sorted.size >= 2) metricRow(st, "변화", signed(sorted.last().second - sorted.first().second, unit))
-        } else if (graphMetric != 0 && !prefs.profileReady) {
-            val n = card(col)
-            n.addView(label("체성분 그래프를 보려면 설정에서 프로필을 입력하세요.", 14f, Ui.SUB))
+        val row = hbox()
+        row.gravity = Gravity.TOP
+        var added = 0
+        for (m in 0..3) {
+            if (m == graphMetric) continue
+            val s = series[m]
+            val mc = vbox()
+            mc.background = rounded(Ui.CARD, 18)
+            mc.setPadding(dp(12), dp(12), dp(12), dp(10))
+            mc.addView(label(names[m], 12f, Ui.SUB), lp(bottom = 4))
+            mc.addView(label(if (s.isEmpty()) "--" else f1(s.last().second) + units[m], 17f, Ui.TEXT, true), lp(bottom = 4))
+            if (s.size >= 2) {
+                val ch = s.last().second - s.first().second
+                val flat = abs(ch) < 0.05
+                val good = isGood(m, ch)
+                mc.addView(label(signed(ch, changeUnit(m)), 12f, if (flat) Ui.TEXT2 else if (good) Ui.TEAL_DARK else Ui.HIGH_TEXT, true), lp(bottom = 4))
+                val sp = SparkView(this)
+                sp.setData(s.map { it.second }, if (flat) Ui.SUB else if (good) Ui.TEAL else Ui.HIGH_ACC)
+                mc.addView(sp, lp())
+            } else mc.addView(label("기록 부족", 12f, Ui.SUB))
+            mc.setOnClickListener { graphMetric = m; showTab(2) }
+            row.addView(mc, weighted(if (added > 0) 8 else 0))
+            added++
+        }
+        col.addView(row, lp(bottom = 12))
+
+        val w = series[0]
+        val mus = series[2]
+        if (w.size >= 2) {
+            val dw = w.last().second - w.first().second
+            val sb = StringBuilder()
+            sb.append(if (abs(dw) < 0.2) "체중은 거의 그대로예요." else "체중이 ${f1(abs(dw))}kg ${if (dw < 0) "줄었어요" else "늘었어요"}.")
+            if (mus.size >= 2) {
+                val dm = mus.last().second - mus.first().second
+                sb.append(" 근육량은 ")
+                sb.append(if (abs(dm) < 0.3) "거의 그대로예요." else if (dm > 0) "${f1(dm)}kg 늘었어요." else "${f1(-dm)}kg 줄었어요.")
+                if (dw < -0.3 && dm > -0.3) sb.append(" 빠진 무게 대부분이 체지방이라 좋은 흐름이에요.")
+                else if (dw < -0.3) sb.append(" 근육도 함께 빠지고 있어요. 단백질 섭취와 근력 운동을 챙겨 보세요.")
+                else if (dw > 0.3 && dm > 0.3) sb.append(" 늘어난 무게에 근육이 포함돼 있어요.")
+            } else sb.append(" 맨발로 측정하면 체지방·근육 변화도 알려드려요.")
+            val s = card(col, color = Ui.TEXT, radius = 20)
+            s.addView(label("$periodName 요약", 13f, 0xFF9FD8CF.toInt(), true), lp(bottom = 6))
+            s.addView(label(sb.toString(), 15f, Color.WHITE))
         }
         return sv
     }
 
-    // ───────────────────────── 설정 화면
+    // ───────────────────────── 내 정보
 
     private fun buildSettings(): View {
         val (sv, col) = page()
-        title(col, "설정")
+        header(col, "내 정보", null)
 
-        val pc = card(col, "내 프로필 (체성분 계산에 사용)")
+        val pc = card(col, "프로필 · 체성분 계산에 사용")
         val eName = field(pc, "이름", prefs.name, InputType.TYPE_CLASS_TEXT)
-        pc.addView(label("성별", 13f, Ui.SUB))
+        pc.addView(label("성별", 13f, Ui.SUB), lp(top = 8))
         val rg = RadioGroup(this)
         rg.orientation = RadioGroup.HORIZONTAL
         val rbM = RadioButton(this); rbM.text = "남성"; rbM.id = View.generateViewId()
@@ -627,7 +960,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
         val dec = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
         val eHeight = field(pc, "키 (cm)", if (prefs.heightCm > 0) f1(prefs.heightCm.toDouble()) else "", dec)
         val eGoal = field(pc, "목표 체중 (kg, 선택)", if (prefs.goal > 0) f1(prefs.goal.toDouble()) else "", dec)
-        button(pc, "프로필 저장") {
+        button(pc, "저장", 0) {
             val y = eYear.text.toString().trim().toIntOrNull()
             val h = eHeight.text.toString().trim().toFloatOrNull()
             if (y == null || y < 1900 || y > 2030) { toast("출생연도를 확인해 주세요"); return@button }
@@ -644,15 +977,13 @@ class MainActivity : Activity(), ScaleBle.Listener {
         val dc = card(col, "체중계")
         if (prefs.deviceAddr.isEmpty()) {
             dc.addView(label("등록된 체중계가 없어요", 15f))
-            button(dc, "체중계 찾기") { startScan() }
+            button(dc, "체중계 찾기", 2) { startScan() }
         } else {
-            dc.addView(label(prefs.deviceName, 16f, Ui.TEXT, true))
-            dc.addView(label(prefs.deviceAddr + " · " + statusText, 12f, Ui.SUB))
-            buttonRow(dc, listOf(
-                "다시 연결" to { ensurePerms { ensureBtOn { ble.connect(prefs.deviceAddr) } } },
-                "다른 기기 찾기" to { startScan() }
-            ))
-            button(dc, "체중계 등록 해제", false) {
+            dc.addView(label(prefs.deviceName, 16f, Ui.TEXT, true), lp(bottom = 3))
+            dc.addView(label(statusText, 13f, if (bleConnected) Ui.TEAL_DARK else Ui.SUB))
+            button(dc, "다시 연결", 1) { ensurePerms { ensureBtOn { ble.connect(prefs.deviceAddr) } } }
+            button(dc, "다른 체중계 찾기", 1) { startScan() }
+            button(dc, "체중계 등록 해제", 1) {
                 ble.disconnect()
                 prefs.deviceAddr = ""; prefs.deviceName = ""
                 statusText = "등록된 체중계가 없어요"
@@ -666,12 +997,12 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
         val data = card(col, "데이터")
         data.addView(label("측정 기록은 이 폰에만 저장돼요. 폰을 바꾸기 전에 CSV로 내보내 두세요.", 13f, Ui.SUB))
-        button(data, "CSV로 내보내기", false) { exportCsv() }
-        button(data, "전체 기록 삭제", false) {
+        button(data, "CSV로 내보내기", 1) { exportCsv() }
+        button(data, "전체 기록 삭제", 1) {
             AlertDialog.Builder(this)
                 .setTitle("전체 기록 삭제")
                 .setMessage("모든 측정 기록을 지울까요? 되돌릴 수 없어요.")
-                .setPositiveButton("삭제") { _, _ -> db.clear(); toast("모두 삭제했어요"); showTab(3) }
+                .setPositiveButton("삭제") { _, _ -> db.clear(); lastMeasure = null; toast("모두 삭제했어요"); showTab(3) }
                 .setNegativeButton("취소", null)
                 .show()
         }
@@ -679,15 +1010,15 @@ class MainActivity : Activity(), ScaleBle.Listener {
         val adv = card(col, "고급 · 문제 해결")
         val mode = if (prefs.parseMode == 0) "자동 (YUNMAI 형식)"
         else "사용자 지정 (바이트 ${prefs.customOffset}, ÷${prefs.customDiv}, ${if (prefs.customLE) "LE" else "BE"})"
-        adv.addView(label("데이터 해석: $mode", 14f))
+        adv.addView(label("데이터 해석: $mode", 14f), lp(bottom = 3))
         adv.addView(label("체중이 이상하게 나오면 보정 도구로 실제 체중에 맞추세요.", 12f, Ui.SUB))
-        button(adv, "보정 도구 (실제 체중으로 맞추기)", false) { calibrate() }
-        if (prefs.parseMode != 0) button(adv, "자동 해석으로 되돌리기", false) { prefs.parseMode = 0; toast("자동 해석으로 바꿨어요"); showTab(3) }
-        button(adv, "통신 로그 보기", false) { showLogs() }
+        button(adv, "보정 도구", 1) { calibrate() }
+        if (prefs.parseMode != 0) button(adv, "자동 해석으로 되돌리기", 1) { prefs.parseMode = 0; toast("자동 해석으로 바꿨어요"); showTab(3) }
+        button(adv, "통신 로그 보기", 1) { showLogs() }
 
         val info = card(col, "앱 정보")
         val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (e: Exception) { "?" }
-        info.addView(label("내 체중계 v$ver", 14f))
+        info.addView(label("내 체중계 v$ver", 14f), lp(bottom = 4))
         info.addView(label("체성분 값은 공개된 근사 공식으로 계산한 추정치이며 의료용이 아닙니다.", 12f, Ui.SUB))
         return sv
     }
@@ -743,9 +1074,12 @@ class MainActivity : Activity(), ScaleBle.Listener {
                 val a = result.device.address
                 runOnUiThread {
                     if (!addrs.contains(a)) {
-                        val star = if (n.uppercase(Locale.ROOT).contains("YUNMAI") || n.uppercase(Locale.ROOT).contains("SCALE")) "⚖️ " else ""
-                        if (star.isNotEmpty()) { addrs.add(0, a); devNames.add(0, n); names.insert("$star$n\n$a", 0) }
-                        else { addrs.add(a); devNames.add(n); names.add("$n\n$a") }
+                        val up = n.uppercase(Locale.ROOT)
+                        if (up.contains("YUNMAI") || up.contains("SCALE") || up.contains("FEELFIT")) {
+                            addrs.add(0, a); devNames.add(0, n); names.insert("⚖ $n\n$a", 0)
+                        } else {
+                            addrs.add(a); devNames.add(n); names.add("$n\n$a")
+                        }
                     }
                 }
             }
@@ -785,14 +1119,14 @@ class MainActivity : Activity(), ScaleBle.Listener {
     // ───────────────────────── BLE 콜백
 
     override fun onBleState(text: String, connected: Boolean) {
-        val wasConnected = bleConnected
+        val was = bleConnected
         statusText = text
         bleConnected = connected
-        vStatus?.let {
-            it.text = text
-            it.setTextColor(if (connected) Ui.TEAL else Ui.TEXT)
+        vConn?.let {
+            it.text = if (connected) "● 연결됨" else "○ 대기"
+            it.setTextColor(if (connected) Ui.TEAL_DARK else Ui.SUB)
         }
-        if (wasConnected != connected && currentTab == 0 && lastMeasure == null) showTab(0)
+        if (was != connected && currentTab == 3) showTab(3)
     }
 
     override fun onBleLog(msg: String) = addLog(msg)
@@ -804,17 +1138,26 @@ class MainActivity : Activity(), ScaleBle.Listener {
         val p = Parser.parse(data, prefs) ?: return
         if (p.final) {
             onFinal(p)
+            return
+        }
+        val lm = lastMeasure
+        if (lm != null && System.currentTimeMillis() - lm.ts < 8000) return
+        val wasLive = liveWeight != null && lastMeasure == null
+        lastMeasure = null
+        if (!wasLive) liveStart = System.currentTimeMillis()
+        liveWeight = p.weight
+        if (prefs.parseMode == 1) checkStable(p.weight)
+        if (lastMeasure != null) return
+        val wv = vLiveWeight
+        if (wasLive && currentTab == 0 && !showingDetail && wv != null) {
+            wv.text = f1(p.weight)
+            vRing?.progress = ((System.currentTimeMillis() - liveStart) / 6000f).coerceIn(0.08f, 0.92f)
         } else {
-            val lm = lastMeasure
-            if (lm != null && System.currentTimeMillis() - lm.ts < 8000) return // 최종값 직후의 잔여 패킷 무시
-            lastMeasure = null
-            liveWeight = p.weight
-            if (prefs.parseMode == 1) checkStable(p.weight)
-            if (currentTab == 0) renderMeasure() else showTab(0)
+            showingDetail = false
+            showTab(0)
         }
     }
 
-    /** 사용자 지정 모드: 같은 값이 1.5초 이상 유지되면 최종값으로 판단 */
     private fun checkStable(w: Double) {
         val now = System.currentTimeMillis()
         recent.add(now to w)
@@ -833,23 +1176,23 @@ class MainActivity : Activity(), ScaleBle.Listener {
         val now = System.currentTimeMillis()
         val lm = lastMeasure
         if (lm != null && now - lm.ts < 20_000 && abs(lm.weight - p.weight) < 0.3) {
-            if (p.res > 0 && lm.res == 0) { lm.res = p.res; if (currentTab == 0) renderMeasure() }
-            return // 같은 측정의 중복 패킷
+            if (p.res > 0 && lm.res == 0) { lm.res = p.res; refreshHome() }
+            return
         }
         liveWeight = null
         val m = Measure(now, p.weight, p.res, p.scaleFat, false)
         lastMeasure = m
-        addLog("최종값 ${f2(p.weight)}kg, 임피던스 ${p.res}")
+        addLog("최종값 ${p.weight}kg, 임피던스 ${p.res}")
         if (prefs.vibrate) vibrate()
         if (prefs.autoSave) saveMeasure(m)
-        if (currentTab == 0) renderMeasure() else showTab(0)
+        showingDetail = false
+        showTab(0)
     }
 
     private fun saveMeasure(m: Measure) {
         if (m.saved) return
-        lastSavedId = db.insert(m.ts, m.weight, m.res, m.sfat, "체중계")
+        db.insert(m.ts, m.weight, m.res, m.sfat, "체중계")
         m.saved = true
-        toast("기록을 저장했어요")
     }
 
     private fun vibrate() {
@@ -897,14 +1240,16 @@ class MainActivity : Activity(), ScaleBle.Listener {
         box.addView(e)
         AlertDialog.Builder(this)
             .setTitle("실제 체중 입력")
-            .setMessage("방금 측정할 때의 실제 체중(공식 앱 값 등)을 입력하세요.\n마지막 데이터: ${Parser.hex(pkt)}")
+            .setMessage("방금 측정할 때의 실제 체중을 입력하세요.\n마지막 데이터: ${Parser.hex(pkt)}")
             .setView(box)
             .setPositiveButton("찾기") { _, _ ->
                 val real = e.text.toString().toDoubleOrNull()
                 if (real == null) { toast("숫자를 입력해 주세요"); return@setPositiveButton }
                 val cands = Parser.candidates(pkt).filter { abs(it.value - real) <= 0.2 }
                 if (cands.isEmpty()) { toast("일치하는 위치를 못 찾았어요. 로그를 확인해 주세요"); return@setPositiveButton }
-                val items = cands.map { "바이트 ${it.offset}-${it.offset + 1} · ${if (it.le) "LE" else "BE"} · ÷${it.div} → ${f2(it.value)} kg" }.toTypedArray()
+                val items = cands.map {
+                    "바이트 ${it.offset}-${it.offset + 1} · ${if (it.le) "LE" else "BE"} · ÷${it.div} → ${String.format(Locale.KOREA, "%.2f", it.value)} kg"
+                }.toTypedArray()
                 AlertDialog.Builder(this)
                     .setTitle("체중 위치 선택")
                     .setItems(items) { _, which ->
@@ -945,8 +1290,8 @@ class MainActivity : Activity(), ScaleBle.Listener {
             val b = BodyCalc.calc(r.weight, r.res, r.sfat, prefs)
             fun o(v: Double?) = if (v == null) "" else f1(v)
             sb.append(listOf(
-                df.format(Date(r.ts)), f2(r.weight), o(b?.bmi), o(b?.fatPct), o(b?.fatKg), o(b?.muscleKg),
-                o(b?.skeletalPct), o(b?.waterPct), b?.bmr?.toInt()?.toString() ?: "",
+                df.format(Date(r.ts)), String.format(Locale.KOREA, "%.2f", r.weight), o(b?.bmi), o(b?.fatPct), o(b?.fatKg),
+                o(b?.muscleKg), o(b?.skeletalPct), o(b?.waterPct), b?.bmr?.toInt()?.toString() ?: "",
                 if (r.res > 0) r.res.toString() else "", r.src
             ).joinToString(",")).append('\n')
         }

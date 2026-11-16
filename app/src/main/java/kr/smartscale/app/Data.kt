@@ -173,22 +173,120 @@ object BodyCalc {
         return Body(bmi, std, obesity, fat, fatKg, lbm, musclePct, muscleKg, skeletal, water, bmr, sf)
     }
 
-    fun bmiGrade(b: Double): Pair<String, Int> = when {
-        b < 18.5 -> "저체중" to Ui.BLUE
-        b < 23.0 -> "정상" to Ui.GREEN
-        b < 25.0 -> "과체중" to Ui.ORANGE
-        else -> "비만" to Ui.RED
+    fun bmiLabel(b: Double): String = when {
+        b < 18.5 -> "저체중"
+        b < 23.0 -> "정상"
+        b < 25.0 -> "비만 전단계"
+        else -> "비만"
     }
 
-    fun fatGrade(f: Double, male: Boolean): Pair<String, Int> {
-        val lo = if (male) 10.0 else 18.0
-        val hi = if (male) 20.0 else 28.0
-        return when {
-            f < lo -> "낮음" to Ui.BLUE
-            f <= hi -> "표준" to Ui.GREEN
-            f <= hi + 5 -> "약간 높음" to Ui.ORANGE
-            else -> "높음" to Ui.RED
+    fun fatRange(male: Boolean): Pair<Double, Double> = if (male) 10.0 to 20.0 else 18.0 to 28.0
+    fun waterRange(male: Boolean): Pair<Double, Double> = if (male) 50.0 to 65.0 else 45.0 to 60.0
+
+    /** 0 = 표준 이하, 1 = 표준, 2 = 표준 이상 */
+    fun zone(v: Double, lo: Double, hi: Double): Int = when {
+        v < lo -> 0
+        v <= hi -> 1
+        else -> 2
+    }
+
+    /** 화면에 보여줄 항목 목록 (섹션별) */
+    fun metrics(weight: Double, b: Body, male: Boolean): List<Pair<String, List<Metric>>> {
+        val (flo, fhi) = fatRange(male)
+        val (wlo, whi) = waterRange(male)
+        val comp = ArrayList<Metric>()
+        comp.add(Metric("체중", weight, "kg", 2, b.stdWeight * 0.85, b.stdWeight * 1.15,
+            "표준 ${f1(b.stdWeight * 0.85)}~${f1(b.stdWeight * 1.15)}kg (표준체중 ${f1(b.stdWeight)}kg의 85~115%)"))
+        if (b.fatKg != null) comp.add(Metric("체지방량", b.fatKg, "kg", 1, weight * flo / 100, weight * fhi / 100,
+            "표준 ${f1(weight * flo / 100)}~${f1(weight * fhi / 100)}kg (체중의 ${flo.toInt()}~${fhi.toInt()}%)"))
+        if (b.muscleKg != null) comp.add(Metric("근육량", b.muscleKg, "kg", 1, null, null,
+            "체지방을 뺀 몸에서 근육이 차지하는 양의 추정치"))
+        if (b.waterPct != null) comp.add(Metric("체수분", b.waterPct, "%", 1, wlo, whi,
+            "표준 ${wlo.toInt()}~${whi.toInt()}%"))
+
+        val obe = ArrayList<Metric>()
+        obe.add(Metric("BMI", b.bmi, "", 1, 18.5, 22.9,
+            "정상 18.5~22.9 · 23~24.9 비만 전단계 · 25 이상 비만", bmiLabel(b.bmi)))
+        if (b.fatPct != null) obe.add(Metric("체지방률", b.fatPct, "%", 1, flo, fhi,
+            "${if (male) "남성" else "여성"} 표준 ${flo.toInt()}~${fhi.toInt()}%"))
+        obe.add(Metric("비만도", b.obesity, "%", 1, 90.0, 110.0, "표준체중 대비 90~110%가 표준"))
+
+        val meta = ArrayList<Metric>()
+        meta.add(Metric("기초대사량", b.bmr, "kcal", 0, null, null,
+            "가만히 있어도 하루에 쓰는 에너지. 근육이 늘면 함께 올라가요"))
+        if (b.skeletalPct != null) meta.add(Metric("골격근 비율", b.skeletalPct, "%", 1, null, null,
+            "체중 대비 골격근 비율 추정치"))
+
+        return listOf("체성분 구성" to comp, "비만 진단" to obe, "대사" to meta)
+    }
+
+    private fun f1(v: Double) = String.format(java.util.Locale.KOREA, "%.1f", v)
+
+    /** 체형 분석: BMI 구간 × 체지방률 구간 */
+    val typeLabels = arrayOf(
+        arrayOf("마른형", "근육형", "운동선수형"),       // 체지방 낮음
+        arrayOf("저체중", "표준", "근육형 과체중"),       // 체지방 표준
+        arrayOf("마른 비만", "비만 경계", "비만")          // 체지방 높음
+    )
+    val typeNotes = arrayOf(
+        arrayOf(
+            "체지방과 체중이 모두 적어요. 근력 운동과 단백질 섭취로 근육을 늘려 보세요.",
+            "체지방은 낮고 체중은 표준이에요. 근육이 잘 발달한 건강한 체형이에요.",
+            "체중은 많지만 체지방이 낮아요. 근육량이 아주 많은 체형이에요."
+        ),
+        arrayOf(
+            "체지방은 표준이지만 체중이 적어요. 근육량을 늘리면 좋아요.",
+            "체중과 체지방률이 모두 표준이에요. 지금 상태를 유지하세요.",
+            "BMI는 높지만 체지방률이 표준이라, 체중 대비 근육이 많은 편이에요."
+        ),
+        arrayOf(
+            "체중은 적은데 체지방 비율이 높아요. 근력 운동으로 근육을 늘려 보세요.",
+            "체중은 표준이지만 체지방이 많아요. 유산소와 근력 운동을 함께 해보세요.",
+            "체중과 체지방이 모두 많아요. 식단 조절과 꾸준한 운동이 필요해요."
+        )
+    )
+
+    /** 체형 칸 (fatRow, bmiCol) — 체지방률이 없으면 null */
+    fun bodyType(b: Body, male: Boolean): Pair<Int, Int>? {
+        val f = b.fatPct ?: return null
+        val (flo, fhi) = fatRange(male)
+        val row = zone(f, flo, fhi)
+        val col = when {
+            b.bmi < 18.5 -> 0
+            b.bmi < 23.0 -> 1
+            else -> 2
         }
+        return row to col
+    }
+}
+
+/** 화면 표시용 항목. lo/hi 가 null 이면 기준 없는 참고값 */
+data class Metric(
+    val name: String,
+    val value: Double,
+    val unit: String,
+    val decimals: Int,
+    val lo: Double?,
+    val hi: Double?,
+    val note: String,
+    val customGrade: String? = null
+) {
+    val hasRange: Boolean get() = lo != null && hi != null
+    val zone: Int get() = if (lo != null && hi != null) BodyCalc.zone(value, lo, hi) else -1
+    val grade: String
+        get() = customGrade ?: when (zone) {
+            0 -> "표준 이하"
+            1 -> "표준"
+            2 -> "표준 이상"
+            else -> "참고"
+        }
+    fun text(): String {
+        val v = when (decimals) {
+            0 -> String.format(java.util.Locale.KOREA, "%,d", value.toInt())
+            2 -> String.format(java.util.Locale.KOREA, "%.2f", value)
+            else -> String.format(java.util.Locale.KOREA, "%.1f", value)
+        }
+        return if (unit.isEmpty()) v else "$v $unit"
     }
 }
 

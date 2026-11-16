@@ -57,49 +57,179 @@ class Prefs(ctx: Context) {
         get() = if (birthYear <= 0) 0 else Calendar.getInstance().get(Calendar.YEAR) - birthYear
     val profileReady: Boolean
         get() = heightCm > 50f && birthYear > 1900
+
+    /** 가족 동기화 코드 (20자 이상, 비어 있으면 동기화 안 함) */
+    var familyCode: String
+        get() = sp.getString("familyCode", "") ?: ""
+        set(v) { sp.edit().putString("familyCode", v).apply() }
+    /** 이 폰 주인의 사용자 id (0 = 미지정) */
+    var ownerUid: Int
+        get() = sp.getInt("ownerUid", 0)
+        set(v) { sp.edit().putInt("ownerUid", v).apply() }
+    /** 이 설치본 고유 id */
+    val deviceId: String
+        get() {
+            var d = sp.getString("deviceId", "") ?: ""
+            if (d.isEmpty()) {
+                d = java.util.UUID.randomUUID().toString().substring(0, 8)
+                sp.edit().putString("deviceId", d).apply()
+            }
+            return d
+        }
 }
 
-/** 측정 기록 1건 */
+/** 사용자(가족 구성원) 프로필 */
+data class Profile(
+    val id: Int,
+    var name: String,
+    var male: Boolean,
+    var birthYear: Int,
+    var heightCm: Float,
+    var goal: Float
+) {
+    val age: Int
+        get() = if (birthYear <= 0) 0 else Calendar.getInstance().get(Calendar.YEAR) - birthYear
+    val profileReady: Boolean
+        get() = heightCm > 50f && birthYear > 1900
+    val display: String
+        get() = name.ifEmpty { "사용자 $id" }
+}
+
+/** 여러 사람 프로필 저장소 (SharedPreferences JSON) */
+class ProfileStore(ctx: Context) {
+    private val sp = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
+
+    fun all(): List<Profile> {
+        val raw = sp.getString("profiles", null)
+        if (raw == null) {
+            // 이전 버전(1인용) 설정을 첫 번째 사람으로 옮김
+            val first = Profile(
+                1, sp.getString("name", "") ?: "", sp.getBoolean("male", true),
+                sp.getInt("birthYear", 0), sp.getFloat("height", 0f), sp.getFloat("goal", 0f)
+            )
+            save(listOf(first))
+            return listOf(first)
+        }
+        val out = ArrayList<Profile>()
+        try {
+            val arr = org.json.JSONArray(raw)
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                out.add(
+                    Profile(
+                        o.getInt("id"), o.optString("name", ""), o.optBoolean("male", true),
+                        o.optInt("birthYear", 0), o.optDouble("height", 0.0).toFloat(), o.optDouble("goal", 0.0).toFloat()
+                    )
+                )
+            }
+        } catch (e: Exception) {}
+        if (out.isEmpty()) out.add(Profile(1, "", true, 0, 0f, 0f))
+        return out
+    }
+
+    fun save(list: List<Profile>) {
+        val arr = org.json.JSONArray()
+        for (p in list) {
+            val o = org.json.JSONObject()
+            o.put("id", p.id); o.put("name", p.name); o.put("male", p.male)
+            o.put("birthYear", p.birthYear); o.put("height", p.heightCm.toDouble()); o.put("goal", p.goal.toDouble())
+            arr.put(o)
+        }
+        sp.edit().putString("profiles", arr.toString()).apply()
+    }
+
+    fun get(id: Int): Profile? = all().firstOrNull { it.id == id }
+
+    fun raw(): String { all(); return sp.getString("profiles", "[]") ?: "[]" }
+
+    /** 다른 폰에서 받은 프로필 목록 반영 */
+    fun saveRaw(json: String) {
+        if (json == raw()) return
+        try {
+            org.json.JSONArray(json)
+            sp.edit().putString("profiles", json).apply()
+        } catch (e: Exception) {}
+    }
+
+    var currentId: Int
+        get() = sp.getInt("currentUser", 1)
+        set(v) { sp.edit().putInt("currentUser", v).apply() }
+
+    fun current(): Profile = get(currentId) ?: all().first()
+
+    fun update(p: Profile) {
+        save(all().map { if (it.id == p.id) p else it })
+    }
+
+    fun add(name: String): Profile {
+        val list = all()
+        val p = Profile((list.maxOfOrNull { it.id } ?: 0) + 1, name, true, 0, 0f, 0f)
+        save(list + p)
+        return p
+    }
+
+    fun remove(id: Int) {
+        val left = all().filter { it.id != id }
+        if (left.isEmpty()) return
+        save(left)
+        if (currentId == id) currentId = left.first().id
+    }
+}
+
+/** 측정 기록 1건. rid = 기기 간 동기화용 고유 ID */
 data class Rec(
     val id: Long,
     val ts: Long,
     val weight: Double,
     val res: Int,
     val sfat: Double?,
-    val src: String
+    val src: String,
+    val uid: Int,
+    val rid: String
 )
 
-class Db(ctx: Context) : SQLiteOpenHelper(ctx, "scale.db", null, 1) {
+class Db(ctx: Context) : SQLiteOpenHelper(ctx, "scale.db", null, 2) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE TABLE rec (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, " +
-                "weight REAL NOT NULL, res INTEGER NOT NULL DEFAULT 0, sfat REAL, src TEXT)"
+                "weight REAL NOT NULL, res INTEGER NOT NULL DEFAULT 0, sfat REAL, src TEXT, " +
+                "uid INTEGER NOT NULL DEFAULT 1, rid TEXT)"
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {}
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE rec ADD COLUMN uid INTEGER NOT NULL DEFAULT 1")
+            db.execSQL("ALTER TABLE rec ADD COLUMN rid TEXT")
+            db.execSQL("UPDATE rec SET rid = lower(hex(randomblob(12))) WHERE rid IS NULL")
+        }
+    }
 
-    fun insert(ts: Long, weight: Double, res: Int, sfat: Double?, src: String): Long {
+    fun insert(ts: Long, weight: Double, res: Int, sfat: Double?, src: String, uid: Int,
+               rid: String = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24)): Rec {
         val cv = ContentValues()
         cv.put("ts", ts)
         cv.put("weight", weight)
         cv.put("res", res)
         if (sfat != null) cv.put("sfat", sfat) else cv.putNull("sfat")
         cv.put("src", src)
-        return writableDatabase.insert("rec", null, cv)
+        cv.put("uid", uid)
+        cv.put("rid", rid)
+        val id = writableDatabase.insert("rec", null, cv)
+        return Rec(id, ts, weight, res, sfat, src, uid, rid)
     }
 
-    fun all(): List<Rec> {
+    private fun query(where: String, args: Array<String>?): List<Rec> {
         val out = ArrayList<Rec>()
         readableDatabase.rawQuery(
-            "SELECT id, ts, weight, res, sfat, src FROM rec ORDER BY ts DESC", null
+            "SELECT id, ts, weight, res, sfat, src, uid, rid FROM rec $where ORDER BY ts DESC", args
         ).use { c ->
             while (c.moveToNext()) {
                 out.add(
                     Rec(
                         c.getLong(0), c.getLong(1), c.getDouble(2), c.getInt(3),
                         if (c.isNull(4)) null else c.getDouble(4),
-                        c.getString(5) ?: ""
+                        c.getString(5) ?: "", c.getInt(6), c.getString(7) ?: ""
                     )
                 )
             }
@@ -107,8 +237,28 @@ class Db(ctx: Context) : SQLiteOpenHelper(ctx, "scale.db", null, 1) {
         return out
     }
 
+    /** uid 가 null 이면 모든 사람 */
+    fun all(uid: Int? = null): List<Rec> =
+        if (uid == null) query("", null) else query("WHERE uid=?", arrayOf(uid.toString()))
+
+    fun byRid(rid: String): Rec? = query("WHERE rid=?", arrayOf(rid)).firstOrNull()
+
+    fun setUid(id: Long, uid: Int) {
+        val cv = ContentValues()
+        cv.put("uid", uid)
+        writableDatabase.update("rec", cv, "id=?", arrayOf(id.toString()))
+    }
+
     fun delete(id: Long) {
         writableDatabase.delete("rec", "id=?", arrayOf(id.toString()))
+    }
+
+    fun deleteByRid(rid: String) {
+        writableDatabase.delete("rec", "rid=?", arrayOf(rid))
+    }
+
+    fun deleteUser(uid: Int) {
+        writableDatabase.delete("rec", "uid=?", arrayOf(uid.toString()))
     }
 
     fun clear() {
@@ -148,7 +298,7 @@ object BodyCalc {
         return if (f < 3.0 || f > 75.0) null else f
     }
 
-    fun calc(weight: Double, res: Int, scaleFat: Double?, p: Prefs): Body? {
+    fun calc(weight: Double, res: Int, scaleFat: Double?, p: Profile): Body? {
         if (!p.profileReady) return null
         val hCm = p.heightCm.toDouble()
         val h = hCm / 100.0

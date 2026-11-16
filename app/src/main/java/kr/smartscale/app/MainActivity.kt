@@ -75,16 +75,18 @@ object Ui {
 
 @SuppressLint("MissingPermission", "SetTextI18n")
 @Suppress("DEPRECATION")
-class MainActivity : Activity(), ScaleBle.Listener {
+class MainActivity : Activity(), Hub.UiListener {
 
     private val REQ_PERM = 1
     private val REQ_CSV = 2
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
     private val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 
-    private lateinit var prefs: Prefs
-    private lateinit var db: Db
-    private lateinit var ble: ScaleBle
+    private val prefs: Prefs get() = Hub.prefs
+    private val db: Db get() = Hub.db
+    private val store: ProfileStore get() = Hub.store
+    private val me: Profile get() = Hub.store.current()
+    private fun profileOf(uid: Int): Profile = Hub.store.get(uid) ?: me
     private val handler = Handler(Looper.getMainLooper())
 
     private lateinit var content: FrameLayout
@@ -92,14 +94,6 @@ class MainActivity : Activity(), ScaleBle.Listener {
     private var currentTab = 0
     private var showingDetail = false
 
-    private var statusText = "등록된 체중계가 없어요"
-    private var bleConnected = false
-    private var liveWeight: Double? = null
-    private var liveStart = 0L
-    private var lastMeasure: Measure? = null
-    private var lastPacket: ByteArray? = null
-    private val logs = ArrayDeque<String>()
-    private val recent = ArrayList<Pair<Long, Double>>()
 
     private var vLiveWeight: TextView? = null
     private var vRing: RingView? = null
@@ -109,7 +103,6 @@ class MainActivity : Activity(), ScaleBle.Listener {
     private var graphDays = 30
     private var graphMetric = 0
 
-    data class Measure(val ts: Long, val weight: Double, var res: Int, val sfat: Double?, var saved: Boolean)
 
     private val dateHead = SimpleDateFormat("M월 d일 EEEE · a h:mm", Locale.KOREA)
     private val fullDate = SimpleDateFormat("M월 d일 (E) a h:mm", Locale.KOREA)
@@ -119,9 +112,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        prefs = Prefs(this)
-        db = Db(this)
-        ble = ScaleBle(this, this)
+        Hub.init(this)
 
         window.statusBarColor = Ui.BG
         window.navigationBarColor = Color.WHITE
@@ -154,19 +145,38 @@ class MainActivity : Activity(), ScaleBle.Listener {
         root.addView(nav, LinearLayout.LayoutParams(MATCH, WRAP))
         setContentView(root)
 
-        if (!prefs.profileReady) {
+        if (!me.profileReady) {
             showTab(3)
             toast("먼저 내 정보(키·출생연도·성별)를 입력해 주세요")
         } else showTab(0)
 
-        if (prefs.deviceAddr.isNotEmpty()) {
-            ensurePerms { ensureBtOn { ble.connect(prefs.deviceAddr) } }
+        if (prefs.deviceAddr.isNotEmpty() || prefs.familyCode.isNotEmpty()) {
+            ensurePerms { ensureBtOn { startBackground() } }
         }
     }
 
-    override fun onDestroy() {
-        ble.disconnect()
-        super.onDestroy()
+    override fun onResume() {
+        super.onResume()
+        Hub.activityVisible = true
+        Hub.listeners.add(this)
+        (getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager).cancelAll().also {
+            if (prefs.deviceAddr.isNotEmpty() || prefs.familyCode.isNotEmpty()) startBackground()
+        }
+        if (currentTab != 3) showTab(currentTab)
+        val m = Hub.lastMeasure
+        if (m != null && m.uid < 0 && System.currentTimeMillis() - m.ts < 30 * 60_000L) askWho(m)
+    }
+
+    override fun onPause() {
+        Hub.activityVisible = false
+        Hub.listeners.remove(this)
+        super.onPause()
+    }
+
+    /** 백그라운드 서비스 시작 (권한이 있을 때만) */
+    private fun startBackground() {
+        if (!hasPerms()) return
+        ScaleService.start(this)
     }
 
     override fun onBackPressed() {
@@ -232,6 +242,22 @@ class MainActivity : Activity(), ScaleBle.Listener {
         col.setPadding(dp(16), dp(22), dp(16), dp(28))
         sv.addView(col)
         return sv to col
+    }
+
+    /** 가족이 2명 이상이면 보이는 사람 선택 줄 */
+    private fun personSwitcher(parent: LinearLayout) {
+        val people = store.all()
+        if (people.size < 2) return
+        val row = hbox()
+        for (p in people) {
+            val on = p.id == me.id
+            val c = label(p.display, 14f, if (on) Color.WHITE else Ui.TEXT2, on)
+            c.background = rounded(if (on) Ui.TEXT else Ui.CARD, 99)
+            c.setPadding(dp(16), dp(9), dp(16), dp(9))
+            c.setOnClickListener { store.currentId = p.id; showTab(currentTab) }
+            row.addView(c, lp(WRAP, right = 8))
+        }
+        parent.addView(row, lp(bottom = 14))
     }
 
     private fun header(parent: LinearLayout, title: String, sub: String?) {
@@ -356,7 +382,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
         }
         vLiveWeight = null; vRing = null; vConn = null
         content.removeAllViews()
-        val live = i == 0 && !showingDetail && lastMeasure == null && liveWeight != null
+        val live = i == 0 && !showingDetail && Hub.lastMeasure == null && Hub.liveWeight != null
         window.statusBarColor = if (live) Ui.DARK else Ui.BG
         window.decorView.systemUiVisibility = if (live) View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
         else View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
@@ -394,14 +420,14 @@ class MainActivity : Activity(), ScaleBle.Listener {
         val size = dp(270)
         val ringBox = FrameLayout(this)
         val ring = RingView(this)
-        ring.progress = ((System.currentTimeMillis() - liveStart) / 6000f).coerceIn(0.08f, 0.92f)
+        ring.progress = ((System.currentTimeMillis() - Hub.liveStart) / 6000f).coerceIn(0.08f, 0.92f)
         ringBox.addView(ring, FrameLayout.LayoutParams(size, size))
         val center = vbox()
         center.gravity = Gravity.CENTER
         center.addView(label("체중", 13f, Ui.MUTED_DARK), lp(WRAP, bottom = 6))
         val wRow = hbox()
         wRow.gravity = Gravity.BOTTOM
-        val wv = heavy(f1(liveWeight ?: 0.0), 62f, Color.WHITE)
+        val wv = heavy(f1(Hub.liveWeight ?: 0.0), 62f, Color.WHITE)
         wRow.addView(wv)
         wRow.addView(label(" kg", 20f, Ui.MUTED_DARK, true), lp(WRAP, bottom = 8))
         center.addView(wRow, lp(WRAP))
@@ -447,14 +473,14 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
     // ───────────────────────── 홈
 
-    private class Shown(val ts: Long, val weight: Double, val res: Int, val sfat: Double?)
+    private class Shown(val ts: Long, val weight: Double, val res: Int, val sfat: Double?, val uid: Int)
 
     /** 방금 측정한 값, 없으면 마지막 기록 */
     private fun currentData(): Shown? {
-        val m = lastMeasure
-        if (m != null) return Shown(m.ts, m.weight, m.res, m.sfat)
-        val r = db.all().firstOrNull() ?: return null
-        return Shown(r.ts, r.weight, r.res, r.sfat)
+        val m = Hub.lastMeasure
+        if (m != null && (m.uid == me.id || m.uid < 0)) return Shown(m.ts, m.weight, m.res, m.sfat, if (m.uid < 0) me.id else m.uid)
+        val r = db.all(me.id).firstOrNull() ?: return null
+        return Shown(r.ts, r.weight, r.res, r.sfat, r.uid)
     }
 
     private fun greeting(): String = when (Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) {
@@ -471,11 +497,11 @@ class MainActivity : Activity(), ScaleBle.Listener {
         head.gravity = Gravity.TOP
         val hl = vbox()
         hl.addView(label(dateHead.format(Date()), 13f, Ui.SUB), lp(bottom = 4))
-        hl.addView(label(if (prefs.name.isEmpty()) greeting() else "${prefs.name}님, ${greeting()}", 21f, Ui.TEXT, true))
+        hl.addView(label(if (me.name.isEmpty()) greeting() else "${me.name}님, ${greeting()}", 21f, Ui.TEXT, true))
         head.addView(hl, weighted())
         val pill = label(
-            if (bleConnected) "● 연결됨" else if (prefs.deviceAddr.isEmpty()) "기기 없음" else "○ 대기",
-            12f, if (bleConnected) Ui.TEAL_DARK else Ui.SUB, true
+            if (Hub.bleConnected) "● 연결됨" else if (prefs.deviceAddr.isEmpty()) "기기 없음" else "○ 대기",
+            12f, if (Hub.bleConnected) Ui.TEAL_DARK else Ui.SUB, true
         )
         pill.background = rounded(Ui.CARD, 99)
         pill.setPadding(dp(10), dp(6), dp(10), dp(6))
@@ -483,6 +509,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
         head.addView(pill)
         vConn = pill
         col.addView(head, lp(bottom = 14))
+        personSwitcher(col)
 
         val data = currentData()
         if (prefs.deviceAddr.isEmpty()) {
@@ -497,7 +524,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
             c.addView(label("• 아침 공복, 화장실 다녀온 뒤 같은 시간에 재면 추세가 정확해요\n• 맨발로 발판 전극에 발을 고르게 올리세요\n• 운동·샤워 직후엔 체지방이 다르게 나올 수 있어요", 14f, Ui.TEXT2))
             return sv
         }
-        val body = BodyCalc.calc(data.weight, data.res, data.sfat, prefs)
+        val body = BodyCalc.calc(data.weight, data.res, data.sfat, profileOf(data.uid))
 
         // 체중 카드
         val wc = hbox()
@@ -505,14 +532,14 @@ class MainActivity : Activity(), ScaleBle.Listener {
         wc.background = rounded(Ui.CARD, 24)
         wc.setPadding(dp(20), dp(18), dp(20), dp(18))
         val wl = vbox()
-        val isNew = lastMeasure != null
+        val isNew = Hub.lastMeasure?.ts == data.ts
         wl.addView(label(if (isNew) "방금 측정한 체중" else "마지막 체중 · " + fullDate.format(Date(data.ts)), 13f, Ui.SUB), lp(bottom = 6))
         val wr = hbox()
         wr.gravity = Gravity.BOTTOM
         wr.addView(heavy(f1(data.weight), 46f))
         wr.addView(label(" kg", 18f, Ui.TEXT2, true), lp(WRAP, bottom = 6))
         wl.addView(wr, lp(WRAP))
-        val prev = db.all().firstOrNull { it.ts < data.ts - 1000 }
+        val prev = db.all(me.id).firstOrNull { it.ts < data.ts - 1000 }
         if (prev != null) {
             val dlt = label(signed(data.weight - prev.weight, "kg") + " · 지난 측정보다", 12f, Ui.TEAL_DARK, true)
             dlt.background = rounded(Ui.TEAL_BG, 8)
@@ -520,14 +547,14 @@ class MainActivity : Activity(), ScaleBle.Listener {
             wl.addView(dlt, lp(WRAP, top = 8))
         }
         wc.addView(wl, weighted())
-        if (prefs.goal > 0) {
+        if (me.goal > 0) {
             val gl = vbox()
             gl.gravity = Gravity.END
-            val remain = data.weight - prefs.goal
-            gl.addView(label("목표 ${f1(prefs.goal.toDouble())}kg까지", 12f, Ui.SUB), lp(WRAP, bottom = 4))
+            val remain = data.weight - me.goal
+            gl.addView(label("목표 ${f1(me.goal.toDouble())}kg까지", 12f, Ui.SUB), lp(WRAP, bottom = 4))
             gl.addView(label(if (abs(remain) < 0.1) "달성!" else f1(abs(remain)) + "kg", 18f, Ui.TEXT, true), lp(WRAP, bottom = 8))
-            val first = db.all().lastOrNull()?.weight ?: data.weight
-            val total = abs(first - prefs.goal)
+            val first = db.all(me.id).lastOrNull()?.weight ?: data.weight
+            val total = abs(first - me.goal)
             val prog = if (total < 0.1) 1.0 else (1.0 - abs(remain) / total).coerceIn(0.03, 1.0)
             val track = FrameLayout(this)
             track.background = rounded(Ui.LINE, 3)
@@ -560,7 +587,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
         val typeBox = vbox()
         typeBox.setPadding(dp(16), dp(14), 0, 0)
-        val bt = BodyCalc.bodyType(body, prefs.male)
+        val bt = BodyCalc.bodyType(body, me.male)
         typeBox.addView(label("체형 분석", 12f, Ui.SUB), lp(WRAP, bottom = 3))
         typeBox.addView(label(if (bt != null) BodyCalc.typeLabels[bt.first][bt.second] else "BMI " + BodyCalc.bmiLabel(body.bmi), 17f, Ui.TEXT, true))
         fig.addView(typeBox, FrameLayout.LayoutParams(WRAP, WRAP))
@@ -569,7 +596,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
         val sideLp = FrameLayout.LayoutParams(dp(152), WRAP)
         sideLp.gravity = Gravity.END or Gravity.TOP
         sideLp.topMargin = dp(14); sideLp.rightMargin = dp(12)
-        val all = BodyCalc.metrics(data.weight, body, prefs.male).flatMap { it.second }
+        val all = BodyCalc.metrics(data.weight, body, me.male).flatMap { it.second }
         for (n in listOf("체지방률", "근육량", "BMI", "기초대사량")) {
             val m = all.firstOrNull { it.name == n } ?: continue
             side.addView(miniCard(m), lp(bottom = 8))
@@ -597,10 +624,22 @@ class MainActivity : Activity(), ScaleBle.Listener {
         sum.addView(go)
         col.addView(sum, lp(bottom = 12))
 
-        val m = lastMeasure
-        if (m != null) {
-            if (!m.saved) button(col, "이 측정 기록 저장", 2) { saveMeasure(m); refreshHome() }
+        val m = Hub.lastMeasure
+        if (m != null && (m.uid == me.id || m.uid < 0)) {
+            if (m.uid < 0) button(col, "누구의 측정인지 선택", 2) { askWho(m) }
+            else if (!m.saved) button(col, "이 측정 기록 저장", 2) { Hub.save(m, notify = false); refreshHome() }
             else {
+                if (m.auto) {
+                    val who = hbox()
+                    who.background = rounded(Ui.CARD, 16)
+                    who.setPadding(dp(16), dp(12), dp(12), dp(12))
+                    who.addView(label("체중으로 ${me.display}님 기록으로 저장했어요", 13f, Ui.TEXT2), weighted())
+                    val ch = label("다른 사람", 13f, Ui.TEAL_DARK, true)
+                    ch.setPadding(dp(8), dp(4), dp(4), dp(4))
+                    ch.setOnClickListener { pickPerson("누구의 측정인가요?") { p -> Hub.assign(m, p.id); showTab(0) } }
+                    who.addView(ch)
+                    col.addView(who, lp(bottom = 8))
+                }
                 val ok = label("✓ 기록에 저장됨 · " + timeOnly.format(Date(m.ts)), 13f, Ui.TEAL_DARK, true)
                 ok.gravity = Gravity.CENTER
                 col.addView(ok, lp(top = 4))
@@ -643,13 +682,13 @@ class MainActivity : Activity(), ScaleBle.Listener {
         back.addView(bb, lp(dp(42), dp(42), right = 10))
         val bt = vbox()
         bt.addView(label("상세 분석", 20f, Ui.TEXT, true), lp(bottom = 3))
-        val who = "${if (prefs.male) "남성" else "여성"} · ${f1(prefs.heightCm.toDouble())}cm · ${prefs.age}세"
+        val who = "${if (me.male) "남성" else "여성"} · ${f1(me.heightCm.toDouble())}cm · ${me.age}세"
         bt.addView(label((if (data != null) fullDate.format(Date(data.ts)) + " · " else "") + who, 12f, Ui.SUB))
         back.addView(bt, weighted())
         col.addView(back, lp(bottom = 14))
 
         if (data == null) { col.addView(label("측정 기록이 없어요.", 15f, Ui.SUB)); return sv }
-        val body = BodyCalc.calc(data.weight, data.res, data.sfat, prefs)
+        val body = BodyCalc.calc(data.weight, data.res, data.sfat, profileOf(data.uid))
         if (body == null) { col.addView(label("내 정보를 먼저 입력해 주세요.", 15f, Ui.SUB)); return sv }
 
         val legend = hbox()
@@ -662,7 +701,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
         }
         col.addView(legend, lp(bottom = 12))
 
-        for ((title, list) in BodyCalc.metrics(data.weight, body, prefs.male)) {
+        for ((title, list) in BodyCalc.metrics(data.weight, body, me.male)) {
             if (list.isEmpty()) continue
             val c = card(col, title)
             c.setPadding(dp(18), dp(16), dp(18), dp(6))
@@ -693,7 +732,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
         th.addView(label("체형 분석", 14f, Ui.TEXT2, true), weighted())
         th.addView(label("BMI × 체지방률", 12f, Ui.SUB))
         tc.addView(th, lp(bottom = 10))
-        val type = BodyCalc.bodyType(body, prefs.male)
+        val type = BodyCalc.bodyType(body, me.male)
         val hdr = hbox()
         hdr.addView(View(this), lp(dp(50), 1))
         for (t in listOf("BMI 낮음", "표준", "높음")) {
@@ -721,10 +760,10 @@ class MainActivity : Activity(), ScaleBle.Listener {
         else "체지방률이 있어야 체형을 분석할 수 있어요. 맨발로 측정해 주세요."
         tc.addView(label(note, 14f, Ui.TEXT2), lp(top = 8))
 
-        val (flo, fhi) = BodyCalc.fatRange(prefs.male)
+        val (flo, fhi) = BodyCalc.fatRange(me.male)
         val foot = label(
             "표준 범위: BMI는 대한비만학회 기준(18.5~22.9 정상, 23~24.9 비만 전단계), 체지방률은 " +
-                "${if (prefs.male) "남성" else "여성"} ${flo.toInt()}~${fhi.toInt()}%를 사용해요. " +
+                "${if (me.male) "남성" else "여성"} ${flo.toInt()}~${fhi.toInt()}%를 사용해요. " +
                 "가정용 체중계의 체성분 값은 추정치이니 변화 추이로 보세요.", 12f, Ui.SUB
         )
         foot.setPadding(dp(6), dp(4), dp(6), 0)
@@ -736,8 +775,9 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
     private fun buildRecords(): View {
         val (sv, col) = page()
-        val list = db.all()
-        header(col, "기록", "총 ${list.size}회 측정")
+        val list = db.all(me.id)
+        header(col, "기록", "${me.display} · 총 ${list.size}회 측정")
+        personSwitcher(col)
 
         if (list.isNotEmpty()) {
             val now = System.currentTimeMillis()
@@ -780,7 +820,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
                 g = card(col, day)
                 g.setPadding(dp(18), dp(14), dp(18), dp(6))
             }
-            val body = BodyCalc.calc(r.weight, r.res, r.sfat, prefs)
+            val body = BodyCalc.calc(r.weight, r.res, r.sfat, profileOf(r.uid))
             val item = hbox()
             item.setPadding(0, dp(10), 0, dp(10))
             val left = vbox()
@@ -801,10 +841,10 @@ class MainActivity : Activity(), ScaleBle.Listener {
     }
 
     private fun recordDetail(r: Rec) {
-        val b = BodyCalc.calc(r.weight, r.res, r.sfat, prefs)
+        val b = BodyCalc.calc(r.weight, r.res, r.sfat, profileOf(r.uid))
         val sb = StringBuilder()
         if (b != null) {
-            for (sec in BodyCalc.metrics(r.weight, b, prefs.male)) {
+            for (sec in BodyCalc.metrics(r.weight, b, me.male)) {
                 for (m in sec.second) sb.append("${m.name}: ${m.text()}  (${m.grade})\n")
             }
         } else sb.append("체중: ${f1(r.weight)} kg\n")
@@ -814,10 +854,13 @@ class MainActivity : Activity(), ScaleBle.Listener {
             .setTitle(fullDate.format(Date(r.ts)))
             .setMessage(sb.toString())
             .setPositiveButton("닫기", null)
+            .setNeutralButton("사람 바꾸기") { _, _ ->
+                pickPerson("누구의 기록인가요?") { p -> Hub.reassignRecord(r, p.id); toast("${p.display}님 기록으로 옮겼어요") }
+            }
             .setNegativeButton("삭제") { _, _ ->
                 AlertDialog.Builder(this)
                     .setMessage("이 기록을 삭제할까요?")
-                    .setPositiveButton("삭제") { _, _ -> db.delete(r.id); toast("삭제했어요"); showTab(1) }
+                    .setPositiveButton("삭제") { _, _ -> Hub.deleteRecord(r); toast("삭제했어요"); showTab(1) }
                     .setNegativeButton("취소", null)
                     .show()
             }
@@ -837,7 +880,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
             .setPositiveButton("저장") { _, _ ->
                 val v = e.text.toString().toDoubleOrNull()
                 if (v == null || v < 2 || v > 300) toast("올바른 체중을 입력해 주세요")
-                else { db.insert(System.currentTimeMillis(), v, 0, null, "수동"); toast("저장했어요"); showTab(1) }
+                else { Hub.addManual(v, me.id); toast("저장했어요"); showTab(1) }
             }
             .setNegativeButton("취소", null)
             .show()
@@ -847,7 +890,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
     private fun metricValue(r: Rec, metric: Int): Double? {
         if (metric == 0) return r.weight
-        val b = BodyCalc.calc(r.weight, r.res, r.sfat, prefs) ?: return null
+        val b = BodyCalc.calc(r.weight, r.res, r.sfat, profileOf(r.uid)) ?: return null
         return when (metric) { 1 -> b.fatPct; 2 -> b.muscleKg; else -> b.bmi }
     }
 
@@ -857,8 +900,9 @@ class MainActivity : Activity(), ScaleBle.Listener {
         val sel = dayOpts.indexOf(graphDays).coerceAtLeast(0)
         val periodName = listOf("최근 1주", "최근 30일", "최근 3개월", "최근 1년")[sel]
         val now = System.currentTimeMillis()
-        val recs = db.all().filter { it.ts >= now - graphDays * 86_400_000L }.sortedBy { it.ts }
-        header(col, "변화 추이", "$periodName · ${recs.size}회 측정")
+        val recs = db.all(me.id).filter { it.ts >= now - graphDays * 86_400_000L }.sortedBy { it.ts }
+        header(col, "변화 추이", "${me.display} · $periodName · ${recs.size}회 측정")
+        personSwitcher(col)
         segmented(col, listOf("1주", "1개월", "3개월", "1년"), sel) { graphDays = dayOpts[it]; showTab(2) }
 
         val names = listOf("체중", "체지방률", "근육량", "BMI")
@@ -890,7 +934,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
         }
         c.addView(top, lp(bottom = 10))
         val chart = ChartView(this)
-        chart.setData(main, if (graphMetric == 0 && prefs.goal > 0) prefs.goal.toDouble() else null, units[graphMetric])
+        chart.setData(main, if (graphMetric == 0 && me.goal > 0) me.goal.toDouble() else null, units[graphMetric])
         c.addView(chart, lp())
 
         val row = hbox()
@@ -945,31 +989,35 @@ class MainActivity : Activity(), ScaleBle.Listener {
     private fun buildSettings(): View {
         val (sv, col) = page()
         header(col, "내 정보", null)
+        personSwitcher(col)
 
-        val pc = card(col, "프로필 · 체성분 계산에 사용")
-        val eName = field(pc, "이름", prefs.name, InputType.TYPE_CLASS_TEXT)
+        val pc = card(col, "${me.display}님 프로필 · 체성분 계산에 사용")
+        val eName = field(pc, "이름", me.name, InputType.TYPE_CLASS_TEXT)
         pc.addView(label("성별", 13f, Ui.SUB), lp(top = 8))
         val rg = RadioGroup(this)
         rg.orientation = RadioGroup.HORIZONTAL
         val rbM = RadioButton(this); rbM.text = "남성"; rbM.id = View.generateViewId()
         val rbF = RadioButton(this); rbF.text = "여성"; rbF.id = View.generateViewId()
         rg.addView(rbM); rg.addView(rbF)
-        rg.check(if (prefs.male) rbM.id else rbF.id)
+        rg.check(if (me.male) rbM.id else rbF.id)
         pc.addView(rg)
-        val eYear = field(pc, "출생연도 (예: 1981)", if (prefs.birthYear > 0) prefs.birthYear.toString() else "", InputType.TYPE_CLASS_NUMBER)
+        val eYear = field(pc, "출생연도 (예: 1981)", if (me.birthYear > 0) me.birthYear.toString() else "", InputType.TYPE_CLASS_NUMBER)
         val dec = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-        val eHeight = field(pc, "키 (cm)", if (prefs.heightCm > 0) f1(prefs.heightCm.toDouble()) else "", dec)
-        val eGoal = field(pc, "목표 체중 (kg, 선택)", if (prefs.goal > 0) f1(prefs.goal.toDouble()) else "", dec)
+        val eHeight = field(pc, "키 (cm)", if (me.heightCm > 0) f1(me.heightCm.toDouble()) else "", dec)
+        val eGoal = field(pc, "목표 체중 (kg, 선택)", if (me.goal > 0) f1(me.goal.toDouble()) else "", dec)
         button(pc, "저장", 0) {
             val y = eYear.text.toString().trim().toIntOrNull()
             val h = eHeight.text.toString().trim().toFloatOrNull()
             if (y == null || y < 1900 || y > 2030) { toast("출생연도를 확인해 주세요"); return@button }
             if (h == null || h < 80 || h > 250) { toast("키를 확인해 주세요"); return@button }
-            prefs.name = eName.text.toString().trim()
-            prefs.male = rg.checkedRadioButtonId == rbM.id
-            prefs.birthYear = y
-            prefs.heightCm = h
-            prefs.goal = eGoal.text.toString().trim().toFloatOrNull() ?: 0f
+            val pr = me
+            pr.name = eName.text.toString().trim()
+            pr.male = rg.checkedRadioButtonId == rbM.id
+            pr.birthYear = y
+            pr.heightCm = h
+            pr.goal = eGoal.text.toString().trim().toFloatOrNull() ?: 0f
+            store.update(pr)
+            Hub.profilesChanged()
             toast("저장했어요")
             showTab(0)
         }
@@ -980,16 +1028,101 @@ class MainActivity : Activity(), ScaleBle.Listener {
             button(dc, "체중계 찾기", 2) { startScan() }
         } else {
             dc.addView(label(prefs.deviceName, 16f, Ui.TEXT, true), lp(bottom = 3))
-            dc.addView(label(statusText, 13f, if (bleConnected) Ui.TEAL_DARK else Ui.SUB))
-            button(dc, "다시 연결", 1) { ensurePerms { ensureBtOn { ble.connect(prefs.deviceAddr) } } }
+            dc.addView(label(Hub.statusText, 13f, if (Hub.bleConnected) Ui.TEAL_DARK else Ui.SUB))
+            button(dc, "다시 연결", 1) { ensurePerms { ensureBtOn { startBackground(); Hub.connect() } } }
             button(dc, "다른 체중계 찾기", 1) { startScan() }
             button(dc, "체중계 등록 해제", 1) {
-                ble.disconnect()
+                Hub.ble?.disconnect()
                 prefs.deviceAddr = ""; prefs.deviceName = ""
-                statusText = "등록된 체중계가 없어요"
+                Hub.statusText = "등록된 체중계가 없어요"
                 showTab(3)
             }
         }
+
+        // 가족 · 이 폰 주인
+        val fc = card(col, "가족")
+        val people = store.all()
+        for (p in people) {
+            val r = hbox()
+            r.setPadding(0, dp(10), 0, dp(10))
+            val tag = (if (p.id == prefs.ownerUid) "  · 이 폰 주인" else "")
+            r.addView(label(p.display + tag, 15f, Ui.TEXT, p.id == me.id), weighted())
+            r.addView(label(if (p.profileReady) "${p.heightCm.toInt()}cm · ${p.age}세" else "정보 미입력", 12f, Ui.SUB))
+            r.setOnClickListener { store.currentId = p.id; showTab(3) }
+            fc.addView(r)
+            divider(fc)
+        }
+        fc.addView(label("체중계에 올라가면 체중이 가장 가까운 사람의 기록으로 자동 저장돼요. 애매하면 물어봐요.", 12f, Ui.SUB), lp(top = 8))
+        button(fc, "+ 사람 추가", 1) { addPerson { p -> store.currentId = p.id; showTab(3) } }
+        button(fc, "이 폰 주인 정하기", 1) {
+            pickPerson("이 폰은 누구 폰인가요?") { p -> prefs.ownerUid = p.id; toast("${p.display}님 폰으로 정했어요"); showTab(3) }
+        }
+        if (people.size > 1) button(fc, "${me.display}님 삭제", 1) {
+            val target = me
+            AlertDialog.Builder(this)
+                .setTitle("${target.display}님 삭제")
+                .setMessage("${target.display}님과 그 기록을 모두 지울까요?")
+                .setPositiveButton("삭제") { _, _ ->
+                    for (r in db.all(target.id)) Hub.deleteRecord(r)
+                    store.remove(target.id)
+                    if (prefs.ownerUid == target.id) prefs.ownerUid = 0
+                    Hub.profilesChanged()
+                    showTab(3)
+                }
+                .setNegativeButton("취소", null)
+                .show()
+        }
+
+        // 폰끼리 기록 공유
+        val sc = card(col, "가족 폰과 기록 공유")
+        val code = prefs.familyCode
+        if (!Sync.firebaseReady(this)) {
+            sc.addView(label("Firebase 설정이 들어간 버전에서 쓸 수 있어요.", 13f, Ui.SUB))
+        } else if (code.isEmpty()) {
+            sc.addView(label("가족 코드를 만들어 다른 폰에 입력하면, 누가 측정하든 그 사람 폰으로 기록과 알림이 가요.", 13f, Ui.SUB))
+            button(sc, "새 가족 코드 만들기", 2) {
+                prefs.familyCode = Sync.newCode()
+                ScaleService.start(this, ScaleService.ACTION_RESYNC)
+                toast("가족 코드를 만들었어요. 다른 폰에 입력해 주세요")
+                showTab(3)
+            }
+            button(sc, "가족 코드 입력", 1) { enterFamilyCode() }
+        } else {
+            sc.addView(label(if (Sync.active) "● 공유 중" else if (Sync.lastError.isNotEmpty()) "오류: ${Sync.lastError}" else "연결 중…", 14f,
+                if (Sync.active) Ui.TEAL_DARK else Ui.SUB, true), lp(bottom = 6))
+            val ct = label(code.chunked(4).joinToString("-"), 17f, Ui.TEXT, true)
+            ct.typeface = Typeface.MONOSPACE
+            ct.setTextIsSelectable(true)
+            sc.addView(ct, lp(bottom = 4))
+            sc.addView(label("이 코드를 다른 폰의 「가족 코드 입력」에 넣으세요. 코드는 비밀번호처럼 관리하세요.", 12f, Ui.SUB))
+            button(sc, "코드 복사", 1) {
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("family", code))
+                toast("가족 코드를 복사했어요")
+            }
+            button(sc, "공유 끊기", 1) {
+                prefs.familyCode = ""
+                Sync.stop()
+                showTab(3)
+            }
+        }
+
+        // 백그라운드 · 알림
+        val bc = card(col, "알림 · 백그라운드")
+        bc.addView(label("앱을 닫아도 체중계를 기다리고, 측정되면 알림을 보내요. 갤럭시는 배터리 설정을 「제한 없음」으로 해야 끊기지 않아요.", 13f, Ui.SUB))
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            button(bc, "알림 허용하기", 2) { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 9) }
+        }
+        val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+        if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            button(bc, "배터리 제한 해제하기", 2) {
+                try {
+                    val i = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    i.data = android.net.Uri.parse("package:$packageName")
+                    startActivity(i)
+                } catch (e: Exception) { toast("설정 화면을 열 수 없어요") }
+            }
+        } else bc.addView(label("✓ 배터리 제한 없음", 13f, Ui.TEAL_DARK, true), lp(top = 6))
 
         val mc = card(col, "측정")
         switchRow(mc, "자동 저장", "측정이 끝나면 바로 기록에 저장", prefs.autoSave) { prefs.autoSave = it }
@@ -998,11 +1131,11 @@ class MainActivity : Activity(), ScaleBle.Listener {
         val data = card(col, "데이터")
         data.addView(label("측정 기록은 이 폰에만 저장돼요. 폰을 바꾸기 전에 CSV로 내보내 두세요.", 13f, Ui.SUB))
         button(data, "CSV로 내보내기", 1) { exportCsv() }
-        button(data, "전체 기록 삭제", 1) {
+        button(data, "${me.display}님 기록 전체 삭제", 1) {
             AlertDialog.Builder(this)
-                .setTitle("전체 기록 삭제")
-                .setMessage("모든 측정 기록을 지울까요? 되돌릴 수 없어요.")
-                .setPositiveButton("삭제") { _, _ -> db.clear(); lastMeasure = null; toast("모두 삭제했어요"); showTab(3) }
+                .setTitle("기록 전체 삭제")
+                .setMessage("${me.display}님의 모든 측정 기록을 지울까요? 가족 폰에서도 지워지고 되돌릴 수 없어요.")
+                .setPositiveButton("삭제") { _, _ -> for (r in db.all(me.id)) Hub.deleteRecord(r); Hub.lastMeasure = null; toast("모두 삭제했어요"); showTab(3) }
                 .setNegativeButton("취소", null)
                 .show()
         }
@@ -1038,7 +1171,12 @@ class MainActivity : Activity(), ScaleBle.Listener {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 9) { if (currentTab == 3) showTab(3); return }
         if (requestCode != REQ_PERM) return
+        if (hasPerms() && Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            handler.postDelayed({ requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 9) }, 400)
+        }
         val p = pendingPerm
         pendingPerm = null
         if (hasPerms()) p?.invoke()
@@ -1102,9 +1240,10 @@ class MainActivity : Activity(), ScaleBle.Listener {
                 val n = devNames[which]
                 prefs.deviceAddr = a
                 prefs.deviceName = n
-                addLog("기기 등록: $n ($a)")
+                Hub.addLog("기기 등록: $n ($a)")
                 toast("$n 등록 완료")
-                ble.connect(a)
+                startBackground()
+                Hub.connect()
                 showTab(0)
             }
             .setNegativeButton("취소", null)
@@ -1116,103 +1255,87 @@ class MainActivity : Activity(), ScaleBle.Listener {
         }, 20_000)
     }
 
-    // ───────────────────────── BLE 콜백
+    // ───────────────────────── 엔진(Hub) 이벤트
 
-    override fun onBleState(text: String, connected: Boolean) {
-        val was = bleConnected
-        statusText = text
-        bleConnected = connected
-        vConn?.let {
-            it.text = if (connected) "● 연결됨" else "○ 대기"
-            it.setTextColor(if (connected) Ui.TEAL_DARK else Ui.SUB)
-        }
-        if (was != connected && currentTab == 3) showTab(3)
-    }
-
-    override fun onBleLog(msg: String) = addLog(msg)
-
-    override fun onBleData(uuid: String, data: ByteArray) {
-        lastPacket = data
-        val short = if (uuid.length >= 8) uuid.substring(4, 8) else uuid
-        addLog("← $short (${data.size}B) ${Parser.hex(data)}")
-        val p = Parser.parse(data, prefs) ?: return
-        if (p.final) {
-            onFinal(p)
-            return
-        }
-        val lm = lastMeasure
-        if (lm != null && System.currentTimeMillis() - lm.ts < 8000) return
-        val wasLive = liveWeight != null && lastMeasure == null
-        lastMeasure = null
-        if (!wasLive) liveStart = System.currentTimeMillis()
-        liveWeight = p.weight
-        if (prefs.parseMode == 1) checkStable(p.weight)
-        if (lastMeasure != null) return
-        val wv = vLiveWeight
-        if (wasLive && currentTab == 0 && !showingDetail && wv != null) {
-            wv.text = f1(p.weight)
-            vRing?.progress = ((System.currentTimeMillis() - liveStart) / 6000f).coerceIn(0.08f, 0.92f)
-        } else {
-            showingDetail = false
-            showTab(0)
-        }
-    }
-
-    private fun checkStable(w: Double) {
-        val now = System.currentTimeMillis()
-        recent.add(now to w)
-        recent.removeAll { now - it.first > 3000 }
-        if (recent.size >= 4) {
-            val vals = recent.map { it.second }
-            val span = now - recent.first().first
-            if (vals.max() - vals.min() <= 0.05 && span >= 1500) {
-                recent.clear()
-                onFinal(Packet(true, vals.average(), 0, null))
+    override fun onHubChanged(kind: Int) {
+        when (kind) {
+            Hub.EV_STATE -> {
+                vConn?.let {
+                    it.text = if (Hub.bleConnected) "● 연결됨" else "○ 대기"
+                    it.setTextColor(if (Hub.bleConnected) Ui.TEAL_DARK else Ui.SUB)
+                }
+                if (currentTab == 3) showTab(3)
             }
+            Hub.EV_LIVE -> {
+                val wv = vLiveWeight
+                val lw = Hub.liveWeight
+                if (currentTab == 0 && !showingDetail && wv != null && lw != null) {
+                    wv.text = f1(lw)
+                    vRing?.progress = ((System.currentTimeMillis() - Hub.liveStart) / 6000f).coerceIn(0.08f, 0.92f)
+                } else {
+                    showingDetail = false
+                    showTab(0)
+                }
+            }
+            Hub.EV_FINAL -> { showingDetail = false; showTab(0) }
+            Hub.EV_ASK -> Hub.lastMeasure?.let { askWho(it) }
+            Hub.EV_DATA -> if (currentTab != 3) showTab(currentTab)
         }
     }
 
-    private fun onFinal(p: Packet) {
-        val now = System.currentTimeMillis()
-        val lm = lastMeasure
-        if (lm != null && now - lm.ts < 20_000 && abs(lm.weight - p.weight) < 0.3) {
-            if (p.res > 0 && lm.res == 0) { lm.res = p.res; refreshHome() }
-            return
-        }
-        liveWeight = null
-        val m = Measure(now, p.weight, p.res, p.scaleFat, false)
-        lastMeasure = m
-        addLog("최종값 ${p.weight}kg, 임피던스 ${p.res}")
-        if (prefs.vibrate) vibrate()
-        if (prefs.autoSave) saveMeasure(m)
-        showingDetail = false
-        showTab(0)
+    /** 누구의 측정인지 고르기 */
+    private fun askWho(m: Measure) {
+        val people = store.all()
+        val names = people.map { it.display }.toMutableList()
+        names.add("+ 새 사람 추가")
+        AlertDialog.Builder(this)
+            .setTitle("누구의 측정인가요? · ${f1(m.weight)}kg")
+            .setItems(names.toTypedArray()) { _, which ->
+                if (which < people.size) {
+                    Hub.assign(m, people[which].id)
+                    toast("${people[which].display}님 기록으로 저장했어요")
+                } else addPerson { p -> Hub.assign(m, p.id) }
+            }
+            .setNegativeButton("저장 안 함", null)
+            .show()
     }
 
-    private fun saveMeasure(m: Measure) {
-        if (m.saved) return
-        db.insert(m.ts, m.weight, m.res, m.sfat, "체중계")
-        m.saved = true
+    private fun pickPerson(title: String, onPick: (Profile) -> Unit) {
+        val people = store.all()
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setItems(people.map { it.display }.toTypedArray()) { _, which -> onPick(people[which]) }
+            .setNegativeButton("취소", null)
+            .show()
     }
 
-    private fun vibrate() {
-        try {
-            val v = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-            v?.vibrate(VibrationEffect.createOneShot(150, VibrationEffect.DEFAULT_AMPLITUDE))
-        } catch (e: Exception) {}
+    private fun addPerson(then: (Profile) -> Unit) {
+        val box = FrameLayout(this)
+        box.setPadding(dp(20), dp(8), dp(20), 0)
+        val e = EditText(this)
+        e.hint = "예: 아내, 지수"
+        e.setSingleLine()
+        box.addView(e)
+        AlertDialog.Builder(this)
+            .setTitle("새 사람 이름")
+            .setView(box)
+            .setPositiveButton("추가") { _, _ ->
+                val n = e.text.toString().trim()
+                if (n.isEmpty()) { toast("이름을 입력해 주세요"); return@setPositiveButton }
+                val p = store.add(n)
+                Hub.profilesChanged()
+                then(p)
+                toast("$n 님을 추가했어요. 내 정보에서 키·출생연도를 입력해 주세요")
+            }
+            .setNegativeButton("취소", null)
+            .show()
     }
 
     // ───────────────────────── 로그 · 보정
 
-    private fun addLog(msg: String) {
-        val t = SimpleDateFormat("HH:mm:ss", Locale.KOREA).format(Date())
-        logs.addLast("[$t] $msg")
-        while (logs.size > 600) logs.removeFirst()
-    }
-
     private fun showLogs() {
         val sv = ScrollView(this)
-        val tv = label(if (logs.isEmpty()) "아직 로그가 없어요" else logs.joinToString("\n"), 11f, Ui.TEXT)
+        val tv = label(if (Hub.logs.isEmpty()) "아직 로그가 없어요" else Hub.logs.joinToString("\n"), 11f, Ui.TEXT)
         tv.typeface = Typeface.MONOSPACE
         tv.setTextIsSelectable(true)
         tv.setPadding(dp(16), dp(8), dp(16), dp(8))
@@ -1222,15 +1345,42 @@ class MainActivity : Activity(), ScaleBle.Listener {
             .setView(sv)
             .setPositiveButton("복사") { _, _ ->
                 val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                cm.setPrimaryClip(ClipData.newPlainText("scale-log", logs.joinToString("\n")))
+                cm.setPrimaryClip(ClipData.newPlainText("scale-log", Hub.logs.joinToString("\n")))
                 toast("로그를 복사했어요")
             }
             .setNegativeButton("닫기", null)
             .show()
     }
 
+    private fun enterFamilyCode() {
+        val box = FrameLayout(this)
+        box.setPadding(dp(20), dp(8), dp(20), 0)
+        val e = EditText(this)
+        e.hint = "예: ABCD-EFGH-…"
+        e.setSingleLine()
+        box.addView(e)
+        AlertDialog.Builder(this)
+            .setTitle("가족 코드 입력")
+            .setMessage("다른 폰의 내 정보 → 가족 폰과 기록 공유에 있는 코드를 입력하세요.")
+            .setView(box)
+            .setPositiveButton("연결") { _, _ ->
+                val c = e.text.toString().uppercase(Locale.ROOT).filter { it.isLetterOrDigit() }
+                if (c.length < 20) { toast("코드를 다시 확인해 주세요"); return@setPositiveButton }
+                prefs.familyCode = c
+                ScaleService.start(this, ScaleService.ACTION_RESYNC)
+                toast("연결했어요. 잠시 후 가족 정보가 들어와요")
+                handler.postDelayed({
+                    if (store.all().size > 1 && prefs.ownerUid == 0)
+                        pickPerson("이 폰은 누구 폰인가요?") { p -> prefs.ownerUid = p.id; store.currentId = p.id; showTab(0) }
+                    else showTab(3)
+                }, 2500)
+            }
+            .setNegativeButton("취소", null)
+            .show()
+    }
+
     private fun calibrate() {
-        val pkt = lastPacket
+        val pkt = Hub.lastPacket
         if (pkt == null) { toast("먼저 체중계에 올라가 데이터를 받아주세요"); return }
         val box = FrameLayout(this)
         box.setPadding(dp(20), dp(8), dp(20), 0)
@@ -1271,7 +1421,7 @@ class MainActivity : Activity(), ScaleBle.Listener {
     // ───────────────────────── CSV
 
     private fun exportCsv() {
-        val list = db.all()
+        val list = db.all(me.id)
         if (list.isEmpty()) { toast("내보낼 기록이 없어요"); return }
         val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
         i.addCategory(Intent.CATEGORY_OPENABLE)
@@ -1285,12 +1435,12 @@ class MainActivity : Activity(), ScaleBle.Listener {
         if (requestCode != REQ_CSV || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         val df = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA)
-        val sb = StringBuilder("일시,체중(kg),BMI,체지방률(%),체지방량(kg),근육량(kg),골격근비율(%),체수분(%),기초대사량(kcal),임피던스,입력\n")
+        val sb = StringBuilder("이름,일시,체중(kg),BMI,체지방률(%),체지방량(kg),근육량(kg),골격근비율(%),체수분(%),기초대사량(kcal),임피던스,입력\n")
         for (r in db.all().reversed()) {
-            val b = BodyCalc.calc(r.weight, r.res, r.sfat, prefs)
+            val b = BodyCalc.calc(r.weight, r.res, r.sfat, profileOf(r.uid))
             fun o(v: Double?) = if (v == null) "" else f1(v)
             sb.append(listOf(
-                df.format(Date(r.ts)), String.format(Locale.KOREA, "%.2f", r.weight), o(b?.bmi), o(b?.fatPct), o(b?.fatKg),
+                profileOf(r.uid).display, df.format(Date(r.ts)), String.format(Locale.KOREA, "%.2f", r.weight), o(b?.bmi), o(b?.fatPct), o(b?.fatKg),
                 o(b?.muscleKg), o(b?.skeletalPct), o(b?.waterPct), b?.bmr?.toInt()?.toString() ?: "",
                 if (r.res > 0) r.res.toString() else "", r.src
             ).joinToString(",")).append('\n')

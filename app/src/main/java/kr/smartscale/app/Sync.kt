@@ -8,6 +8,7 @@ import com.google.firebase.firestore.DocumentReference
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
+import kotlin.math.abs
 
 /**
  * Firebase Firestore 로 가족 간 기록·프로필 동기화.
@@ -85,6 +86,16 @@ object Sync {
                     DocumentChange.Type.ADDED, DocumentChange.Type.MODIFIED -> {
                         val uid = (d.getLong("uid") ?: 1L).toInt()
                         val local = Hub.db.byRid(rid)
+                        val ts = d.getLong("ts") ?: 0L
+                        val w = d.getDouble("weight") ?: 0.0
+                        // 두 폰이 같은 측정을 각각 받은 경우: rid 가 작은 쪽 하나만 남김 (양쪽 폰이 같은 규칙으로 정리)
+                        val dup = if (local == null) Hub.db.all().firstOrNull {
+                            it.rid != rid && abs(it.ts - ts) < 90_000L && abs(it.weight - w) < 0.25
+                        } else null
+                        if (dup != null) {
+                            if (rid > dup.rid) { delete(rid); continue }
+                            Hub.db.delete(dup.id); delete(dup.rid)
+                        }
                         if (local == null) {
                             val r = Hub.db.insert(
                                 d.getLong("ts") ?: 0L, d.getDouble("weight") ?: 0.0,

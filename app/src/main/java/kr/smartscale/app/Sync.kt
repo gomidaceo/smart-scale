@@ -59,7 +59,7 @@ object Sync {
         Hub.addLog("동기화 시작")
 
         famReg = f.addSnapshotListener { snap, err ->
-            if (err != null) { lastError = err.message ?: "오류"; Hub.addLog("동기화 오류: $lastError"); Hub.emit(Hub.EV_STATE); return@addSnapshotListener }
+            if (err != null) { onError(err); return@addSnapshotListener }
             val json = snap?.getString("profiles")
             if (json == null) {
                 pushProfiles(Hub.store.raw())     // 처음 만든 가족: 내 프로필 올리기
@@ -70,8 +70,9 @@ object Sync {
         }
 
         recReg = f.collection("records").addSnapshotListener { snap, err ->
-            if (err != null) { lastError = err.message ?: "오류"; Hub.addLog("동기화 오류: $lastError"); Hub.emit(Hub.EV_STATE); return@addSnapshotListener }
+            if (err != null) { onError(err); return@addSnapshotListener }
             if (snap == null) return@addSnapshotListener
+            reauthTried = false
             var changed = false
             val remoteIds = HashSet<String>()
             for (ch in snap.documentChanges) {
@@ -113,6 +114,29 @@ object Sync {
     }
 
     private var uploadedLocal = false
+    private var reauthTried = false
+
+    /** 인증이 무효가 되면(익명 계정 삭제 등) 한 번 새로 로그인해서 다시 연결 */
+    private fun onError(err: com.google.firebase.firestore.FirebaseFirestoreException) {
+        lastError = err.message ?: "오류"
+        Hub.addLog("동기화 오류: ${err.code} $lastError")
+        val code = err.code
+        val authProblem = code == com.google.firebase.firestore.FirebaseFirestoreException.Code.UNAUTHENTICATED ||
+            code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED
+        if (authProblem && !reauthTried) {
+            reauthTried = true
+            stop()
+            val auth = FirebaseAuth.getInstance()
+            auth.signOut()
+            auth.signInAnonymously()
+                .addOnSuccessListener { Hub.addLog("다시 로그인함"); start(Hub.app) }
+                .addOnFailureListener { lastError = "로그인 실패: ${it.message}"; Hub.emit(Hub.EV_STATE) }
+            return
+        }
+        if (code == com.google.firebase.firestore.FirebaseFirestoreException.Code.PERMISSION_DENIED)
+            lastError = "접근이 거부됐어요. Firestore 규칙이 게시됐는지 확인해 주세요"
+        Hub.emit(Hub.EV_STATE)
+    }
 
     /** 다른 폰에서 측정된 내 기록이면 알림 */
     private fun maybeNotify(r: Rec, dev: String) {

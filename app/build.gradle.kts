@@ -23,6 +23,8 @@ android {
             storePassword = "smartscale"
             keyAlias = "scale"
             keyPassword = "smartscale"
+            enableV1Signing = true
+            enableV2Signing = true
         }
     }
 

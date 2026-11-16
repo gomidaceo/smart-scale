@@ -516,6 +516,7 @@ class MainActivity : Activity(), Hub.UiListener {
             val c = card(col)
             c.addView(label("체중계를 연결해 주세요", 17f, Ui.TEXT, true), lp(bottom = 6))
             c.addView(label("체중계에 올라가면 자동으로 측정하고 기록해요.", 14f, Ui.SUB))
+            quickConnectButton(c)
             button(c, "체중계 찾기", 2) { startScan() }
         }
 
@@ -1025,6 +1026,7 @@ class MainActivity : Activity(), Hub.UiListener {
         val dc = card(col, "체중계")
         if (prefs.deviceAddr.isEmpty()) {
             dc.addView(label("등록된 체중계가 없어요", 15f))
+            quickConnectButton(dc)
             button(dc, "체중계 찾기", 2) { startScan() }
         } else {
             dc.addView(label(prefs.deviceName, 16f, Ui.TEXT, true), lp(bottom = 3))
@@ -1199,26 +1201,64 @@ class MainActivity : Activity(), Hub.UiListener {
         ensurePerms { ensureBtOn { doScan() } }
     }
 
+    /** 검색된 기기 1개 */
+    private class Found(val addr: String, var name: String, var rssi: Int, var scaleLike: Boolean)
+
+    private val SCALE_SERVICES = listOf("0000ffe0", "0000ffe5", "d618d000", "0000181d", "0000181b")
+    private val SCALE_WORDS = listOf("YUNMAI", "SCALE", "FEELFIT", "BODY", "FAT", "WEIGH", "INBODY", "MI SCALE", "MIBFS", "QN-", "CHIPSEA", "FITDAYS")
+
     private fun doScan() {
         val scanner = btAdapter()?.bluetoothLeScanner
         if (scanner == null) { toast("블루투스 검색을 시작할 수 없어요"); return }
-        val names = ArrayAdapter<String>(this, android.R.layout.simple_list_item_1)
-        val addrs = ArrayList<String>()
-        val devNames = ArrayList<String>()
+        val known = prefs.knownScales
+        val found = LinkedHashMap<String, Found>()
+        val shown = ArrayList<Found>()
+        val adapter = ArrayAdapter<String>(this, android.R.layout.simple_list_item_1)
         var stopped = false
+
+        fun rank(f: Found): Int = when {
+            known.contains(f.addr) || f.addr == prefs.deviceAddr -> 0
+            f.scaleLike -> 1
+            else -> 2
+        }
+        fun line(f: Found): String {
+            val dist = when { f.rssi > -60 -> "아주 가까움"; f.rssi > -75 -> "가까움"; else -> "멂" }
+            val nm = f.name.ifEmpty { "(이름 없음)" }
+            return when (rank(f)) {
+                0 -> "✅ 내 체중계 · 예전에 연결한 기기\n$nm · ${f.addr} · $dist"
+                1 -> "⚖ 체중계로 보여요\n$nm · ${f.addr} · $dist"
+                else -> "$nm\n${f.addr} · $dist"
+            }
+        }
+        fun refresh() {
+            shown.clear()
+            shown.addAll(found.values.sortedWith(compareBy<Found> { rank(it) }.thenByDescending { it.rssi }))
+            adapter.setNotifyOnChange(false)
+            adapter.clear()
+            adapter.addAll(shown.map { line(it) })
+            adapter.notifyDataSetChanged()
+        }
+
         val cb = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
-                val n = result.device.name ?: result.scanRecord?.deviceName ?: return
                 val a = result.device.address
+                val n = result.device.name ?: result.scanRecord?.deviceName ?: ""
+                val uuids = result.scanRecord?.serviceUuids?.map { it.uuid.toString().lowercase(Locale.ROOT) } ?: emptyList()
+                val up = n.uppercase(Locale.ROOT)
+                val byName = SCALE_WORDS.any { up.contains(it) }
+                val bySvc = uuids.any { u -> SCALE_SERVICES.any { u.startsWith(it) } }
+                val isKnown = known.contains(a) || a == prefs.deviceAddr
+                // 이름도 없고 체중계 단서도 없는 기기는 숨김
+                if (n.isEmpty() && !bySvc && !isKnown) return
                 runOnUiThread {
-                    if (!addrs.contains(a)) {
-                        val up = n.uppercase(Locale.ROOT)
-                        if (up.contains("YUNMAI") || up.contains("SCALE") || up.contains("FEELFIT")) {
-                            addrs.add(0, a); devNames.add(0, n); names.insert("⚖ $n\n$a", 0)
-                        } else {
-                            addrs.add(a); devNames.add(n); names.add("$n\n$a")
-                        }
+                    val f = found[a]
+                    if (f == null) found[a] = Found(a, n, result.rssi, byName || bySvc)
+                    else {
+                        if (n.isNotEmpty()) f.name = n
+                        f.rssi = result.rssi
+                        if (byName || bySvc) f.scaleLike = true
                     }
+                    refresh()
                 }
             }
         }
@@ -1234,25 +1274,46 @@ class MainActivity : Activity(), Hub.UiListener {
         }
         val dlg = AlertDialog.Builder(this)
             .setTitle("체중계에 올라가 주세요… (검색 중)")
-            .setAdapter(names) { _, which ->
+            .setAdapter(adapter) { _, which ->
                 stop()
-                val a = addrs[which]
-                val n = devNames[which]
-                prefs.deviceAddr = a
-                prefs.deviceName = n
-                Hub.addLog("기기 등록: $n ($a)")
-                toast("$n 등록 완료")
-                startBackground()
-                Hub.connect()
-                showTab(0)
+                val f = shown.getOrNull(which) ?: return@setAdapter
+                registerScale(f.addr, f.name.ifEmpty { "체중계" })
             }
             .setNegativeButton("취소", null)
             .setOnDismissListener { stop() }
             .show()
         handler.postDelayed({
             stop()
-            if (dlg.isShowing) dlg.setTitle(if (addrs.isEmpty()) "기기를 찾지 못했어요" else "검색 완료 — 기기를 선택하세요")
+            if (dlg.isShowing) dlg.setTitle(
+                when {
+                    found.isEmpty() -> "기기를 찾지 못했어요 — 체중계에 올라간 채로 다시 검색하세요"
+                    found.values.any { rank(it) == 0 } -> "내 체중계를 찾았어요 — ✅ 표시를 누르세요"
+                    found.values.any { rank(it) == 1 } -> "⚖ 표시가 체중계예요"
+                    else -> "검색 완료 — 기기를 선택하세요"
+                }
+            )
         }, 20_000)
+    }
+
+    private fun registerScale(addr: String, name: String) {
+        prefs.deviceAddr = addr
+        prefs.deviceName = name
+        prefs.addKnownScale(addr)
+        Hub.addLog("기기 등록: $name ($addr)")
+        toast("$name 등록 완료")
+        startBackground()
+        Hub.connect()
+        showTab(0)
+    }
+
+    /** 검색 없이 예전에 연결한 체중계로 바로 등록 */
+    private fun quickConnectButton(parent: LinearLayout) {
+        val known = prefs.knownScales
+        if (known.isEmpty()) return
+        val addr = known.first()
+        button(parent, "예전에 연결한 체중계로 바로 연결 (${addr.takeLast(5)})", 0) {
+            ensurePerms { ensureBtOn { registerScale(addr, prefs.knownName(addr)) } }
+        }
     }
 
     // ───────────────────────── 엔진(Hub) 이벤트

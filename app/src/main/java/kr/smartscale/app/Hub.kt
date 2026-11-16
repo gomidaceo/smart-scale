@@ -98,6 +98,7 @@ object Hub : ScaleBle.Listener {
         val short = if (uuid.length >= 8) uuid.substring(4, 8) else uuid
         addLog("← $short (${data.size}B) ${Parser.hex(data)}")
         val p = Parser.parse(data, prefs) ?: return
+        if (!prefs.knownScales.contains(prefs.deviceAddr)) prefs.addKnownScale(prefs.deviceAddr)
         if (p.final) { onFinal(p); return }
         val lm = lastMeasure
         if (lm != null && System.currentTimeMillis() - lm.ts < 8000) return

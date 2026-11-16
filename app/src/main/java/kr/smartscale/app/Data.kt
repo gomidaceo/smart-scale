@@ -66,6 +66,26 @@ class Prefs(ctx: Context) {
     var ownerUid: Int
         get() = sp.getInt("ownerUid", 0)
         set(v) { sp.edit().putInt("ownerUid", v).apply() }
+    /** 실제로 데이터를 보내온 적 있는 체중계 주소들 (처음엔 사용자 체중계 주소를 미리 넣어 둠) */
+    val knownScales: List<String>
+        get() {
+            val raw = sp.getString("knownScales", null) ?: "98:7B:F3:31:C0:67=YUNMAI-SIGNAL-H1KR"
+            return raw.split(",").filter { it.isNotBlank() }.map { it.substringBefore("=") }
+        }
+
+    fun knownName(addr: String): String {
+        val raw = sp.getString("knownScales", null) ?: "98:7B:F3:31:C0:67=YUNMAI-SIGNAL-H1KR"
+        return raw.split(",").firstOrNull { it.startsWith(addr) }?.substringAfter("=", "")?.ifEmpty { null } ?: "체중계"
+    }
+
+    fun addKnownScale(addr: String, name: String = deviceName) {
+        if (addr.isEmpty()) return
+        val raw = sp.getString("knownScales", null) ?: "98:7B:F3:31:C0:67=YUNMAI-SIGNAL-H1KR"
+        val items = raw.split(",").filter { it.isNotBlank() && !it.startsWith(addr) }.toMutableList()
+        items.add(0, "$addr=${name.replace(",", " ").replace("=", " ")}")
+        sp.edit().putString("knownScales", items.take(5).joinToString(",")).apply()
+    }
+
     /** 이 설치본 고유 id */
     val deviceId: String
         get() {
